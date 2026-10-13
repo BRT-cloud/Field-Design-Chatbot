@@ -913,3 +913,139 @@ body {
     line-height: 1.6;
   }
 }
+
+/* ==========================================================================
+   토스트 상태별 변형 (성공/에러)
+   ========================================================================== */
+.soft-toast.toast-success {
+  background: #065f46;
+  color: #ffffff;
+  border-left: 4px solid #10b981;
+}
+
+.soft-toast.toast-error {
+  background: #991b1b;
+  color: #ffffff;
+  border-left: 4px solid #ef4444;
+}
+
+/* ==========================================================================
+   키보드 접근성 (:focus-visible)
+   ========================================================================== */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+.choice-bubble-card:focus-visible,
+.standard-pick-item:focus-visible,
+.pill-option-btn:focus-visible {
+  outline: 3px solid #f43f5e;
+  outline-offset: 2px;
+}
+
+/* ==========================================================================
+   반응형 모바일 및 태블릿 레이아웃 (≤768px, ≤480px)
+   ========================================================================== */
+@media screen and (max-width: 768px) {
+  body {
+    overflow-y: auto;
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .top-nav-bar {
+    padding: 0.6rem 1rem;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .nav-stepper-indicator {
+    order: 3;
+    width: 100%;
+    margin-top: 0.3rem;
+  }
+
+  .main-viewport-container {
+    padding: 0.8rem;
+    height: auto;
+    min-height: calc(100vh - 110px);
+  }
+
+  .immersive-step-card {
+    padding: 1.2rem;
+    border-radius: var(--radius-md);
+    max-height: none;
+    overflow: visible;
+  }
+
+  .big-question-title {
+    font-size: 1.35rem;
+  }
+
+  .question-subtitle {
+    font-size: 0.88rem;
+  }
+
+  .choice-grid-cards {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
+
+  .dual-selector-row {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+
+  .card-navigation-bar {
+    flex-wrap: wrap;
+    gap: 0.6rem;
+  }
+
+  .nav-center-hint {
+    order: 3;
+    width: 100%;
+    text-align: center;
+    font-size: 0.78rem;
+  }
+
+  .ppt-slides-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media screen and (max-width: 480px) {
+  .card-step-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.4rem;
+  }
+
+  .soft-privacy-tag {
+    font-size: 0.72rem;
+    padding: 0.2rem 0.6rem;
+  }
+
+  .btn-soft-nav,
+  .btn-soft-primary {
+    padding: 0.65rem 1.1rem;
+    font-size: 0.88rem;
+  }
+}
+
+/* ==========================================================================
+   모션 경감 접근성 (prefers-reduced-motion)
+   ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .floating-cloud,
+  .floating-sparkle {
+    display: none !important;
+  }
+}
+

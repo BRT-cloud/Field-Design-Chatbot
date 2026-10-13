@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>체험학습 재구성 챗봇</title>
+  <meta name="description" content="특수교육 현장체험학습 교육과정 재구성 및 UDL 수업 설계 챗봇">
+  <!-- 보안 정책 (Security Policies): XSS 방어, 스니핑 차단, 폰트 및 데이터 제어 -->
+  <meta http-equiv="X-Content-Type-Options" content="nosniff">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net data:; img-src 'self' data: blob:; connect-src 'self' blob:; worker-src 'self' blob:; base-uri 'self'; form-action 'self';">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css">
+  <link href="https://fonts.googleapis.com/css2?family=Dongle:wght@400;700&family=Gaegu:wght@400;700&family=Jua&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <script type="module" crossorigin src="./assets/index-BS47JNby.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-1tFFeeBk.css">
+</head>
+<body>
+  <!-- 깔끔하고 몽글몽글한 화이트 앰비언트 모션 배경 -->
+  <div class="ambient-background" aria-hidden="true">
+    <div class="floating-cloud cloud-1"></div>
+    <div class="floating-cloud cloud-2"></div>
+    <div class="floating-cloud cloud-3"></div>
+    <div class="floating-sparkle sparkle-1"></div>
+    <div class="floating-sparkle sparkle-2"></div>
+  </div>
+
+  <!-- 상단 귀여운 핑크빛 내비게이션 바 -->
+  <header class="top-nav-bar">
+    <div class="nav-brand">
+      <span class="nav-brand-bubble">체험</span>
+      <span class="nav-brand-title">체험학습 재구성 챗봇</span>
+    </div>
+    <div class="nav-stepper-indicator">
+      <span class="step-counter-text" id="stepCounterText">STEP 01 / 11</span>
+      <div class="step-progress-track">
+        <div class="step-progress-fill" id="stepProgressFill" style="width: 9%;"></div>
+      </div>
+    </div>
+    <div class="nav-actions">
+      <button type="button" class="btn-bubble-tool" id="resetWizardBtn" title="처음부터 다시 작성">처음으로</button>
+    </div>
+  </header>
+
+  <!-- 메인 80% 몰입형 질문-선택 카드 레이아웃 -->
+  <main class="main-viewport-container">
+    <div class="immersive-step-card" id="immersiveStepCard">
+      <!-- 상단 스텝 라벨 및 가이드 -->
+      <div class="card-step-header">
+        <span class="soft-step-pill" id="cardStepPill">1단계: 탐험 장소</span>
+        <span class="soft-privacy-tag" id="cardPrivacyTag">개인정보 안심 모드 작동 중</span>
+      </div>
+
+      <!-- 대형 질문 타이틀 & 서브 설명 -->
+      <div class="card-question-box">
+        <h1 class="big-question-title" id="cardQuestionTitle">체험학습을 떠날 장소는 어디인가요?</h1>
+        <p class="question-subtitle" id="cardQuestionSubtitle">학생들과 함께 방문하고 싶은 현장이나 마을 공간을 선택하거나 직접 입력해 주세요.</p>
+      </div>
+
+      <!-- 하단 대답 및 선택 인터랙션 영역 -->
+      <div class="card-interaction-box" id="cardInteractionBox">
+        <!-- 각 스텝에 맞는 컴포넌트가 동적으로 교체됩니다 -->
+      </div>
+
+      <!-- 하단 내비게이션 바 -->
+      <div class="card-navigation-bar">
+        <button type="button" class="btn-soft-nav" id="prevStepBtn" style="visibility: hidden;">
+          <span>&lt; 이전 질문</span>
+        </button>
+        <div class="nav-center-hint" id="navCenterHint">
+          <span class="soft-hint-dot"></span> 추천 항목을 누르면 바로 선택됩니다
+        </div>
+        <button type="button" class="btn-soft-primary" id="nextStepBtn">
+          <span id="nextStepBtnText">다음 단계 &gt;</span>
+        </button>
+      </div>
+    </div>
+  </main>
+
+  <!-- 인쇄 전용 영역 -->
+  <div id="printContainer" class="print-only-container"></div>
+
+  <!-- 토스트 알림 -->
+  <div class="toast-shelf" id="toastShelf"></div>
+
+</body>
+</html>
