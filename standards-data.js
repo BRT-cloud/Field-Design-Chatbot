@@ -5,18 +5,27 @@ export const SCHOOL_LEVEL_OPTIONS = [
     id: "elem",
     name: "초등학교",
     badge: "초등 1~6학년",
+    icon: "🎒",
+    iconBg: "#fef3c7",
+    iconBorder: "#fde68a",
     desc: "성취기준 체크리스트 제공 연계 (국어, 수학, 사회, 바른생활, 슬기로운생활, 즐거운생활)"
   },
   {
     id: "mid",
     name: "중학교",
     badge: "중학 1~3학년",
+    icon: "📚",
+    iconBg: "#e0f2fe",
+    iconBorder: "#bae6fd",
     desc: "2022 개정 중학교 교육과정 연계 (국어, 수학, 사회·역사·도덕, 진로와 직업)"
   },
   {
     id: "high",
     name: "고등학교",
     badge: "고등 1~3학년",
+    icon: "🎓",
+    iconBg: "#ede9fe",
+    iconBorder: "#ddd6fe",
     desc: "2022 개정 고등학교 교육과정 연계 (국어, 수학, 사회·역사·윤리, 진로와 직업)"
   }
 ];

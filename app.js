@@ -8,6 +8,13 @@ import {
   getRecommendedStandards
 } from './standards-data.js';
 import { 
+  recommendThemes,
+  recommendEvalFocus,
+  generateGoals,
+  recommendTeachingMethods,
+  buildPlanContext
+} from './recommend-engine.js';
+import { 
   generateAndDownloadHwpx, 
   buildPlanDocument,
   getAcademicYear 
@@ -52,6 +59,7 @@ const DEFAULT_PLAN = {
   standardsSearchKeyword: "",
   standardsSubjectFilter: "전체",
   theme: "나 스스로 고르고 결제하는 슬기로운 마트 장보기",
+  themeManuallyEdited: false,
   periodCount: 10,
   difficultyLevel: "기본/적용 수준 (시각적 단서 및 단계적 모델링)",
   evalFocusId: "eval-independence",
@@ -73,7 +81,12 @@ export const appState = {
   step: 1, // 1 ~ 11
   plan: structuredClone(DEFAULT_PLAN),
   uploadedTemplateBuffer: null, // 메모리 상의 HWPX ArrayBuffer
-  standardsDisplayLimit: 20
+  standardsDisplayLimit: 20,
+  standardsCurriculumPage: 1,
+  standardsPageSize: 4,
+  themeCycleIndex: 0,
+  showAllEvalFocus: false,
+  showAllTeachingMethods: false
 };
 
 // ============================================================================
@@ -254,6 +267,7 @@ export function loadPlanFromSession() {
         appState.plan = {
           ...DEFAULT_PLAN,
           ...p,
+          themeManuallyEdited: Boolean(p.themeManuallyEdited),
           standards: Array.isArray(p.standards) 
             ? p.standards.filter(s => s && typeof s === 'object' && s.code) 
             : DEFAULT_PLAN.standards,
@@ -373,6 +387,10 @@ function handleResetConfirmation() {
     appState.step = 1;
     appState.plan = structuredClone(DEFAULT_PLAN);
     appState.uploadedTemplateBuffer = null;
+    appState.themeCycleIndex = 0;
+    appState.standardsCurriculumPage = 1;
+    appState.showAllEvalFocus = false;
+    appState.showAllTeachingMethods = false;
     ensureDefaultStandards();
     savePlanToSession();
     renderStep(1);
@@ -408,7 +426,7 @@ function handleInteractionClick(e) {
   const val = target.getAttribute("data-val");
 
   switch (action) {
-    // 1단계: 학교급 선택 (P0 #5 이전 학교급 성취기준 정리)
+    // 1단계: 학교급 선택
     case "select-school-level": {
       if (appState.plan.schoolLevel !== val) {
         const oldLevel = appState.plan.schoolLevel;
@@ -431,7 +449,15 @@ function handleInteractionClick(e) {
 
         appState.plan.standardsSearchKeyword = "";
         appState.plan.standardsSubjectFilter = "전체";
-        appState.standardsDisplayLimit = 20;
+        appState.standardsCurriculumPage = 1;
+
+        // 학교급 변경 시 추천 주제 실시간 업데이트
+        if (!appState.plan.themeManuallyEdited) {
+          const newThemes = recommendThemes(appState.plan);
+          if (newThemes && newThemes.length > 0) {
+            appState.plan.theme = newThemes[0].theme;
+          }
+        }
 
         savePlanToSession();
         renderStep(1);
@@ -449,9 +475,12 @@ function handleInteractionClick(e) {
     case "select-location": {
       appState.plan.locationId = id;
       appState.plan.locationName = val;
-      const themes = THEME_SUGGESTIONS[id];
-      if (themes && themes.length > 0) {
-        appState.plan.theme = themes[0];
+      // 이전 단계의 내용에 맞게 실시간 동적 추천 반영 (직접 수정한 적이 없으면 자동 추천)
+      if (!appState.plan.themeManuallyEdited) {
+        const themes = recommendThemes(appState.plan);
+        if (themes && themes.length > 0) {
+          appState.plan.theme = themes[0].theme;
+        }
       }
       savePlanToSession();
       renderStep(2);
@@ -459,7 +488,7 @@ function handleInteractionClick(e) {
       break;
     }
 
-    // 3단계: 성취기준 토글 (P0 #3 UID 및 ID 기반 토글)
+    // 3단계: 성취기준 토글
     case "toggle-standard": {
       const code = id;
       const all = getStandardsForSchoolLevel(appState.plan.schoolLevel);
@@ -480,12 +509,19 @@ function handleInteractionClick(e) {
         });
         showToast("성취기준이 추가되었습니다.", "success");
       }
+      // 성취기준이 변경되었을 때 직접 수정하지 않은 상태면 주제도 자동 조율
+      if (!appState.plan.themeManuallyEdited) {
+        const themes = recommendThemes(appState.plan);
+        if (themes && themes.length > 0) {
+          appState.plan.theme = themes[0].theme;
+        }
+      }
       savePlanToSession();
       renderStep(3);
       break;
     }
 
-    // 3단계: 직접 입력 성취기준 추가 (P0 #3, #4 멀티라인 파싱 & 고유 번호 충돌 방지)
+    // 3단계: 직접 입력 성취기준 추가
     case "add-custom-standard": {
       const input = document.getElementById("customStdInputField");
       const textVal = (input ? input.value : appState.plan.customStandardInput).trim();
@@ -497,7 +533,6 @@ function handleInteractionClick(e) {
       const lines = textVal.split("\n").map(l => l.trim()).filter(l => l.length > 0);
       let addedCount = 0;
 
-      // 기존 [직접-N]의 최대 번호 확인
       let maxDirectNum = 0;
       for (const s of appState.plan.standards) {
         const m = s.code.match(/^\[직접-(\d+)\]$/);
@@ -533,13 +568,19 @@ function handleInteractionClick(e) {
 
       appState.plan.customStandardInput = "";
       if (input) input.value = "";
+      if (!appState.plan.themeManuallyEdited) {
+        const themes = recommendThemes(appState.plan);
+        if (themes && themes.length > 0) {
+          appState.plan.theme = themes[0].theme;
+        }
+      }
       savePlanToSession();
       renderStep(3);
       showToast(`${addedCount}건의 성취기준이 등록되었습니다.`, "success");
       break;
     }
 
-    // 3단계: 성취기준 개별 삭제 (P0 #3 UID 또는 Code 매칭)
+    // 3단계: 성취기준 개별 삭제
     case "remove-standard": {
       const targetId = id;
       appState.plan.standards = appState.plan.standards.filter(s => (s.id ? s.id !== targetId : s.code !== targetId));
@@ -549,17 +590,24 @@ function handleInteractionClick(e) {
       break;
     }
 
-    // 3단계: 교과목 필터 칩 (P0 #6)
+    // 3단계: 교과목 필터 칩
     case "filter-standards-subject": {
       appState.plan.standardsSubjectFilter = val;
-      appState.standardsDisplayLimit = 20;
+      appState.standardsCurriculumPage = 1;
       renderStep(3);
       break;
     }
 
-    // 3단계: 검색 결과 더 보기 (P0 #6)
-    case "load-more-standards": {
-      appState.standardsDisplayLimit += 20;
+    // 3단계: 페이지네이션
+    case "page-standards-prev": {
+      if (appState.standardsCurriculumPage > 1) {
+        appState.standardsCurriculumPage--;
+        updateCurriculumStandardsList();
+      }
+      break;
+    }
+    case "page-standards-next": {
+      appState.standardsCurriculumPage++;
       updateCurriculumStandardsList();
       break;
     }
@@ -567,9 +615,18 @@ function handleInteractionClick(e) {
     // 4단계: 주제 선택
     case "select-theme": {
       appState.plan.theme = val;
+      appState.plan.themeManuallyEdited = true;
       savePlanToSession();
       renderStep(4);
       showToast("수업 주제가 선택되었습니다.", "info");
+      break;
+    }
+
+    // 4단계: 다른 추천 주제 보기 회전
+    case "cycle-themes": {
+      appState.themeCycleIndex = (appState.themeCycleIndex || 0) + 1;
+      renderStep(4);
+      showToast("새로운 맞춤 추천 주제들을 불러왔습니다.", "info");
       break;
     }
 
@@ -598,32 +655,27 @@ function handleInteractionClick(e) {
       const title = val;
       appState.plan.evalFocusId = id;
       appState.plan.evalFocusTitle = title;
-      const loc = appState.plan.locationName || "체험 현장";
 
-      if (id === "eval-independence") {
-        appState.plan.goalKnowledge = `${loc}의 주요 시설 구조와 이용 절차를 이해한다.`;
-        appState.plan.goalSkill = "최소한의 촉진으로 스스로 필요한 활동을 선택하고 결제·이용을 독립적으로 완수한다.";
-        appState.plan.goalAttitude = "스스로 해냈다는 자립 생활의 성취감과 주도적인 자신감을 갖는다.";
-      } else if (id === "eval-communication") {
-        appState.plan.goalKnowledge = `${loc}에서 상황에 맞는 인사말과 요구 표현을 이해한다.`;
-        appState.plan.goalSkill = "현장 직원이나 동료에게 AAC 도구 또는 구어로 원하는 것을 명확하게 전달한다.";
-        appState.plan.goalAttitude = "상대방의 반응을 경청하고 감사하는 마음을 바른 태도로 표현한다.";
-      } else if (id === "eval-safety") {
-        appState.plan.goalKnowledge = `${loc}과 보행 환경에서 지켜야 할 안전 수칙 및 관람 에티켓을 안다.`;
-        appState.plan.goalSkill = "차례 지키기, 질서 유지, 표지판 확인 등의 안전 행동을 실천한다.";
-        appState.plan.goalAttitude = "다른 시민을 배려하고 공공질서를 준수하려는 올바른 태도를 지닌다.";
-      } else {
-        appState.plan.goalKnowledge = `${loc}에서 경험할 수 있는 다양한 문화와 활동을 탐색한다.`;
-        appState.plan.goalSkill = "자신의 흥미와 선호에 따라 적극적으로 활동에 참여하고 표현한다.";
-        appState.plan.goalAttitude = "배움의 즐거움을 느끼고 친구들과 긍정적인 유대감을 나눈다.";
-      }
+      // 7단계 학습 목표를 선택된 평가 중점 + 장소 + 성취기준 맥락에 맞춰 동적 자동 생성!
+      const goals = generateGoals(appState.plan);
+      appState.plan.goalKnowledge = goals.knowledge;
+      appState.plan.goalSkill = goals.skill;
+      appState.plan.goalAttitude = goals.attitude;
+
       savePlanToSession();
       renderStep(6);
       showToast(`평가 중점이 '${title}'(으)로 설정되었습니다.`, "info");
       break;
     }
 
-    // 8단계: 기능적 지원 태그 추가 (P1 #14)
+    // 6단계: 전체 평가 관점 더보기 토글
+    case "toggle-all-eval-focus": {
+      appState.showAllEvalFocus = !appState.showAllEvalFocus;
+      renderStep(6);
+      break;
+    }
+
+    // 8단계: 기능적 지원 태그 추가
     case "add-functional-tag": {
       if (!appState.plan.functionalNeeds.includes(val)) {
         appState.plan.functionalNeeds.push(val);
@@ -634,12 +686,31 @@ function handleInteractionClick(e) {
       break;
     }
 
-    // 9단계: 수업 방식
+    // 9단계: 수업 방식 선택
     case "select-teaching-method": {
       appState.plan.teachingMethod = val;
       savePlanToSession();
       renderStep(9);
       showToast(`수업 방식이 '${val}'(으)로 설정되었습니다.`, "info");
+      break;
+    }
+
+    // 9단계: 전체 수업 방식 더보기 토글
+    case "toggle-all-teaching-methods": {
+      appState.showAllTeachingMethods = !appState.showAllTeachingMethods;
+      renderStep(9);
+      break;
+    }
+
+    // 10단계: 목차 점프 칩 (TOC)
+    case "jump-toc-section": {
+      const targetId = id;
+      const targetEl = document.getElementById(targetId);
+      const scroller = document.getElementById("udlPrintArea");
+      if (targetEl && scroller) {
+        const targetTop = targetEl.offsetTop - scroller.offsetTop;
+        scroller.scrollTo({ top: Math.max(0, targetTop - 10), behavior: "smooth" });
+      }
       break;
     }
 
@@ -699,6 +770,12 @@ function handleInteractionInput(e) {
       } else {
         appState.plan.locationId = "loc-custom";
       }
+      if (!appState.plan.themeManuallyEdited) {
+        const themes = recommendThemes(appState.plan);
+        if (themes && themes.length > 0) {
+          appState.plan.theme = themes[0].theme;
+        }
+      }
       savePlanToSession();
       const cards = document.querySelectorAll(".choice-bubble-card[data-action='select-location']");
       cards.forEach(card => {
@@ -715,6 +792,7 @@ function handleInteractionInput(e) {
     }
     case "theme":
       appState.plan.theme = val;
+      appState.plan.themeManuallyEdited = true;
       savePlanToSession();
       break;
     case "customStandardInput":
@@ -722,7 +800,7 @@ function handleInteractionInput(e) {
       break;
     case "standardsSearchKeyword":
       appState.plan.standardsSearchKeyword = val;
-      appState.standardsDisplayLimit = 20;
+      appState.standardsCurriculumPage = 1;
       updateCurriculumStandardsList();
       break;
     case "periodCount": {
@@ -762,7 +840,7 @@ function handleInteractionChange(e) {
   // 과목 셀렉트 박스 변경 (P0 #6)
   if (e.target.id === "standardsSubjectSelect") {
     appState.plan.standardsSubjectFilter = e.target.value;
-    appState.standardsDisplayLimit = 20;
+    appState.standardsCurriculumPage = 1;
     renderStep(3);
     return;
   }
@@ -846,6 +924,14 @@ function renderStep(step) {
   const subtitle = document.getElementById("cardQuestionSubtitle");
   const box = document.getElementById("cardInteractionBox");
 
+  if (box) {
+    if (step === 10) {
+      box.setAttribute("data-layout", "scroll");
+    } else {
+      box.setAttribute("data-layout", "fit");
+    }
+  }
+
   switch (step) {
     case 1: renderStep1(pill, title, subtitle, box); break;
     case 2: renderStep2(pill, title, subtitle, box); break;
@@ -860,6 +946,19 @@ function renderStep(step) {
     case 11: renderStep11(pill, title, subtitle, box); break;
     default: break;
   }
+
+  // 화면 크기에 맞춘 무스크롤 자동 밀도 조절 가드 (10단계 제외)
+  if (box && step !== 10) {
+    requestAnimationFrame(() => {
+      box.classList.remove("density-compact", "density-dense");
+      if (box.scrollHeight > box.clientHeight + 4) {
+        box.classList.add("density-compact");
+        if (box.scrollHeight > box.clientHeight + 4) {
+          box.classList.add("density-dense");
+        }
+      }
+    });
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -871,18 +970,29 @@ function renderStep1(pill, title, subtitle, box) {
   subtitle.textContent = "선택하신 학교급에 맞추어 국가 교육과정 성취기준 및 활동 양식을 연결합니다.";
 
   box.innerHTML = `
-    <div class="choice-grid-cards">
-      ${SCHOOL_LEVEL_OPTIONS.map(opt => `
-        <div class="choice-bubble-card ${appState.plan.schoolLevel === opt.name ? 'selected' : ''}" 
-             role="button" tabindex="0" aria-pressed="${appState.plan.schoolLevel === opt.name}"
-             data-action="select-school-level" data-val="${escapeHtml(opt.name)}">
-          <div class="choice-card-top">
-            <span class="choice-card-badge">${escapeHtml(opt.badge)}</span>
+    <div class="school-level-vertical-list">
+      ${SCHOOL_LEVEL_OPTIONS.map(opt => {
+        const isSelected = appState.plan.schoolLevel === opt.name;
+        return `
+          <div class="school-level-row-card ${isSelected ? 'selected' : ''}" 
+               role="button" tabindex="0" aria-pressed="${isSelected}"
+               data-action="select-school-level" data-val="${escapeHtml(opt.name)}">
+            <div class="school-icon-avatar" style="background: ${opt.iconBg || '#f1f5f9'}; border: 1.5px solid ${opt.iconBorder || '#e2e8f0'};">
+              <span>${opt.icon || '🏫'}</span>
+            </div>
+            <div class="school-level-content">
+              <div class="school-level-head">
+                <h2 class="school-level-title">${escapeHtml(opt.name)}</h2>
+                <span class="school-level-badge">${escapeHtml(opt.badge)}</span>
+              </div>
+              <p class="school-level-desc">${escapeHtml(opt.desc)}</p>
+            </div>
+            <div class="school-level-indicator">
+              <span class="school-check-pill">${isSelected ? '선택됨 ✓' : '선택'}</span>
+            </div>
           </div>
-          <h2 class="choice-card-title">${escapeHtml(opt.name)}</h2>
-          <p class="choice-card-desc">${escapeHtml(opt.desc)}</p>
-        </div>
-      `).join("")}
+        `;
+      }).join("")}
     </div>
   `;
 }
@@ -897,41 +1007,39 @@ function renderStep2(pill, title, subtitle, box) {
 
   box.innerHTML = `
     <!-- 장소 직접 입력 -->
-    <div class="input-card-box" style="margin-bottom: 1.6rem;">
-      <label for="customLocationInput" style="font-size: 1.05rem; font-weight: 800; color: #0f172a; margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.5rem;">
-        <span class="label-badge">입력</span>
-        체험학습 장소명
+    <div class="input-card-box" style="margin-bottom: 0.8rem;">
+      <label for="customLocationInput" style="font-size: 0.95rem; font-weight: 800; color: #0f172a; margin-bottom: 0.35rem; display: flex; align-items: center; gap: 0.4rem;">
+        <span class="label-badge" style="font-size: 0.72rem;">입력</span>
+        체험학습 장소명 직접 입력
       </label>
       <input type="text" class="soft-text-input" id="customLocationInput" 
              placeholder="예: 서울숲 곤충식물원, 뚜레쥬르 베이커리 등 직접 입력" 
              value="${escapeHtml(appState.plan.locationName)}" 
              data-model="locationName"
-             style="font-size: 1.1rem; padding: 0.95rem 1.2rem;">
-      <p style="font-size: 0.82rem; color: #64748b; margin-top: 0.4rem; margin-bottom: 0;">
-        * 장소명을 직접 입력하시거나 아래 추천 항목 중 원하는 장소를 클릭하여 선택하세요.
-      </p>
+             style="font-size: 1rem; padding: 0.7rem 1.1rem;">
     </div>
 
     <!-- 추천 항목 -->
     <div>
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.8rem;">
-        <span style="font-family: 'Jua', sans-serif; font-size: 1.1rem; color: var(--text-main);">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.45rem;">
+        <span style="font-family: 'Jua', sans-serif; font-size: 0.98rem; color: var(--text-main);">
           자주 찾는 추천 장소 (클릭 시 자동 반영)
         </span>
-        <span style="font-size: 0.8rem; color: #64748b;">
+        <span style="font-size: 0.78rem; color: #64748b;">
           6가지 주요 테마 공간
         </span>
       </div>
-      <div class="choice-grid-cards">
+      <div class="choice-grid-cards" data-cols="6">
         ${LOCATION_PRESETS.map(loc => `
           <div class="choice-bubble-card ${appState.plan.locationId === loc.id ? 'selected' : ''}" 
                role="button" tabindex="0" aria-pressed="${appState.plan.locationId === loc.id}"
-               data-action="select-location" data-id="${escapeHtml(loc.id)}" data-val="${escapeHtml(loc.name)}">
+               data-action="select-location" data-id="${escapeHtml(loc.id)}" data-val="${escapeHtml(loc.name)}"
+               style="padding: 0.75rem 0.95rem;">
             <div class="choice-card-top">
               <span class="choice-card-badge">${escapeHtml(loc.icon)}</span>
             </div>
-            <h2 class="choice-card-title">${escapeHtml(loc.name)}</h2>
-            <p class="choice-card-desc">${escapeHtml(loc.desc)}</p>
+            <h2 class="choice-card-title" style="font-size: 1.05rem;">${escapeHtml(loc.name)}</h2>
+            <p class="choice-card-desc" style="font-size: 0.82rem;">${escapeHtml(loc.desc)}</p>
           </div>
         `).join("")}
       </div>
@@ -940,7 +1048,7 @@ function renderStep2(pill, title, subtitle, box) {
 }
 
 // ----------------------------------------------------------------------------
-// 3단계: 성취기준 설정 (P0 #3, #4, #6, P1 #13)
+// 3단계: 성취기준 설정 (2열 무스크롤 콕핏 뷰 & 페이지네이션)
 // ----------------------------------------------------------------------------
 function renderStep3(pill, title, subtitle, box) {
   pill.textContent = "3단계: 성취기준 설정";
@@ -952,10 +1060,10 @@ function renderStep3(pill, title, subtitle, box) {
   const keyword = (appState.plan.standardsSearchKeyword || "").trim().toLowerCase();
   const subjectFilter = appState.plan.standardsSubjectFilter || "전체";
 
-  // 장소 특화 추천 성취기준 (P1 #13)
+  // 장소 특화 추천 성취기준
   const recommendedStandards = getRecommendedStandards(appState.plan.schoolLevel, appState.plan.locationId);
 
-  // 모든 고유 과목명 추출 (가나다 정렬, P0 #6 전체 51과목 완벽 지원)
+  // 모든 고유 과목명 추출
   const rawSubjects = [...new Set(allStandards.map(s => s.subject))].sort();
   const allSubjects = ["전체", ...rawSubjects];
 
@@ -970,123 +1078,110 @@ function renderStep3(pill, title, subtitle, box) {
            s.subject.toLowerCase().includes(keyword);
   });
 
-  const displayList = filteredList.slice(0, appState.standardsDisplayLimit);
+  const pageSize = appState.standardsPageSize || 4;
+  const totalPages = Math.max(1, Math.ceil(filteredList.length / pageSize));
+  if (appState.standardsCurriculumPage > totalPages) {
+    appState.standardsCurriculumPage = totalPages;
+  }
+  const page = appState.standardsCurriculumPage || 1;
+  const startIdx = (page - 1) * pageSize;
+  const pageList = filteredList.slice(startIdx, startIdx + pageSize);
 
   box.innerHTML = `
-    <div class="standards-picker-container">
-      <!-- 1) 장소 맞춤 추천 성취기준 쉘프 (P1 #13) -->
-      ${recommendedStandards.length > 0 ? `
-        <div class="recommended-standards-shelf">
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <span style="font-family: 'Jua', sans-serif; font-size: 1rem; color: #15803d; display: flex; align-items: center; gap: 0.4rem;">
-              <span>💡</span> [${escapeHtml(appState.plan.locationName)}] 연계 추천 성취기준 (클릭하여 추가):
+    <div class="standards-two-col-layout">
+      <!-- 왼쪽 칼럼: 추천 쉘프 + 직접 입력 + 현재 등록 목록 -->
+      <div class="std-col-left">
+        <!-- 1) 장소 맞춤 추천 성취기준 쉘프 -->
+        ${recommendedStandards.length > 0 ? `
+          <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 12px; padding: 0.6rem 0.8rem;">
+            <div style="font-family: 'Jua', sans-serif; font-size: 0.9rem; color: #15803d; margin-bottom: 0.35rem; display: flex; align-items: center; justify-content: space-between;">
+              <span>💡 [${escapeHtml(appState.plan.locationName)}] 추천 성취기준 (클릭 추가)</span>
+              <span style="font-size: 0.72rem; color: #166534;">핵심 4선</span>
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.35rem;">
+              ${recommendedStandards.slice(0, 4).map(r => {
+                const isSel = selectedCodes.includes(r.code);
+                return `
+                  <div class="rec-std-chip ${isSel ? 'selected' : ''}" 
+                       role="button" tabindex="0" aria-pressed="${isSel}"
+                       data-action="toggle-standard" data-id="${escapeHtml(r.code)}"
+                       style="padding: 0.4rem 0.55rem; font-size: 0.78rem;">
+                    <div style="font-weight: 800; color: #15803d; font-size: 0.76rem;">${escapeHtml(r.code)} (${escapeHtml(r.subject)})</div>
+                    <div style="color: #1e293b; line-height: 1.25; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-top: 0.1rem;">
+                      ${escapeHtml(r.desc)}
+                    </div>
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          </div>
+        ` : ''}
+
+        <!-- 2) 직접 입력 -->
+        <div style="background: #ffffff; border: 1.5px solid #e2e8f0; border-radius: 12px; padding: 0.65rem 0.85rem;">
+          <label for="customStdInputField" style="font-size: 0.9rem; font-weight: 800; color: #0f172a; display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.3rem;">
+            <span class="label-badge" style="font-size: 0.72rem;">직접 입력</span>
+            <span style="font-size: 0.74rem; color: #64748b; font-weight: 500;">Enter 단독: 등록</span>
+          </label>
+          <div style="display: flex; gap: 0.4rem;">
+            <input type="text" class="soft-text-input" id="customStdInputField" style="flex: 1; padding: 0.5rem 0.8rem; font-size: 0.88rem;"
+                   placeholder="예: [2국01-01] 알맞은 인사말을 주고받는다" 
+                   value="${escapeHtml(appState.plan.customStandardInput)}"
+                   data-model="customStandardInput">
+            <button type="button" class="btn-soft-primary" style="padding: 0.5rem 0.9rem; white-space: nowrap; font-size: 0.85rem; border-radius: 10px;" data-action="add-custom-standard">
+              등록 (+)
+            </button>
+          </div>
+        </div>
+
+        <!-- 3) 현재 등록된 성취기준 목록 -->
+        <div style="flex: 1; min-height: 0; display: flex; flex-direction: column;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem;">
+            <span style="font-weight: 800; font-size: 0.88rem; color: #0f172a; display: flex; align-items: center; gap: 0.35rem;">
+              <span style="display: inline-block; width: 7px; height: 7px; background: #10b981; border-radius: 50%;"></span>
+              현재 등록된 성취기준 (${appState.plan.standards.length}개):
             </span>
-            <span style="font-size: 0.78rem; color: #166534;">핵심 성취기준 6~8선</span>
+            <span style="font-size: 0.74rem; color: #64748b;">(최소 1개 이상)</span>
           </div>
-          <div class="recommended-standards-grid">
-            ${recommendedStandards.map(r => {
-              const isSel = selectedCodes.includes(r.code);
-              return `
-                <div class="rec-std-chip ${isSel ? 'selected' : ''}" 
-                     role="button" tabindex="0" aria-pressed="${isSel}"
-                     data-action="toggle-standard" data-id="${escapeHtml(r.code)}">
-                  <div style="font-size: 0.8rem; font-weight: 800; color: #15803d;">${escapeHtml(r.code)} (${escapeHtml(r.subject)})</div>
-                  <div style="font-size: 0.85rem; color: #1e293b; margin-top: 0.2rem; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">
-                    ${escapeHtml(r.desc)}
-                  </div>
-                  <div style="text-align: right; margin-top: 0.3rem;">
-                    <span style="font-size: 0.75rem; color: ${isSel ? '#15803d' : '#64748b'}; font-weight: 700;">
-                      ${isSel ? '선택됨 ✓' : '+ 추가'}
-                    </span>
-                  </div>
+          <div class="std-registered-scrollbox">
+            ${appState.plan.standards.length === 0 ? `
+              <div style="font-size: 0.82rem; color: #94a3b8; text-align: center; padding: 1rem 0;">
+                등록된 성취기준이 없습니다. 성취기준을 추가해 주세요.
+              </div>
+            ` : appState.plan.standards.map(s => `
+              <div class="std-current-item" style="padding: 0.35rem 0.55rem; font-size: 0.82rem;">
+                <div style="display: flex; align-items: baseline; gap: 0.4rem; flex: 1; overflow: hidden;">
+                  <span class="std-code-badge" style="font-size: 0.78rem;">${escapeHtml(s.code)}</span>
+                  <span style="font-weight: 700; color: #0f172a; white-space: nowrap;">${escapeHtml(s.title || s.subject || '')}</span>
+                  <span style="color: #475569; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(s.desc)}</span>
                 </div>
-              `;
-            }).join("")}
-          </div>
-        </div>
-      ` : ''}
-
-      <!-- 2) 성취기준 직접 입력 / 멀티라인 붙여넣기 (P0 #4) -->
-      <div class="input-card-box">
-        <label for="customStdInputField" style="font-size: 1rem; font-weight: 800; color: #0f172a; display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.6rem;">
-          <span style="display: flex; align-items: center; gap: 0.5rem;">
-            <span class="label-badge">직접 입력</span>
-            성취기준 넣기
-          </span>
-          <span style="font-size: 0.8rem; color: #64748b; font-weight: 500;">
-            Enter 단독: 등록 / Shift+Enter: 줄바꿈
-          </span>
-        </label>
-        <div style="display: flex; gap: 0.6rem; align-items: stretch; flex-wrap: wrap;">
-          <textarea class="soft-text-input" id="customStdInputField" style="flex: 1; min-width: 250px; min-height: 52px; resize: vertical;"
-                    placeholder="예: [2국01-01] 알맞은 인사말을 주고받는다&#10;여러 줄을 동시에 복사하여 붙여넣을 수도 있습니다." 
-                    data-model="customStandardInput">${escapeHtml(appState.plan.customStandardInput)}</textarea>
-          <button type="button" class="btn-soft-primary" style="padding: 0.85rem 1.4rem; white-space: nowrap; font-size: 0.95rem; border-radius: 12px; align-self: flex-start;" data-action="add-custom-standard">
-            성취기준 등록 (+)
-          </button>
-        </div>
-        <p style="font-size: 0.82rem; color: #64748b; margin-top: 0.5rem; margin-bottom: 0;">
-          * 코드가 없는 문장은 [직접-1], [직접-2] 형식으로 번호가 순차 부여되며, 중복 코드 충돌 없이 안전하게 관리됩니다.
-        </p>
-      </div>
-
-      <!-- 3) 현재 등록된 성취기준 목록 -->
-      <div class="std-current-box">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem;">
-          <span style="font-weight: 800; font-size: 0.98rem; color: #0f172a; display: flex; align-items: center; gap: 0.4rem;">
-            <span style="display: inline-block; width: 8px; height: 8px; background: #10b981; border-radius: 50%;"></span>
-            현재 등록된 성취기준 (${appState.plan.standards.length}개):
-          </span>
-          <span style="font-size: 0.78rem; color: #64748b;">(최소 1개 이상 등록 필요)</span>
-        </div>
-        
-        ${appState.plan.standards.length === 0 ? `
-          <div class="empty-state-box">
-            등록된 성취기준이 없습니다. 상단에서 성취기준을 입력하거나 아래 추천/교육과정 목록에서 추가해 주세요.
-          </div>
-        ` : `
-          <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-            ${appState.plan.standards.map((s) => `
-              <div class="std-current-item">
-                <div style="display: flex; align-items: baseline; gap: 0.6rem; flex: 1; flex-wrap: wrap;">
-                  <span class="std-code-badge">${escapeHtml(s.code)}</span>
-                  <span style="font-weight: 700; font-size: 0.92rem; color: #0f172a;">${escapeHtml(s.title || s.subject || '성취기준')}</span>
-                  <span style="font-size: 0.88rem; color: #475569; word-break: keep-all;">${escapeHtml(s.desc)}</span>
-                </div>
-                <button type="button" class="btn-bubble-tool" style="padding: 0.3rem 0.7rem; font-size: 0.8rem; color: #e11d48; border-color: #fecdd3; background: #fff1f2;" 
-                        data-action="remove-standard" data-id="${escapeHtml(s.id || s.code)}" title="성취기준 삭제">삭제 ×</button>
+                <button type="button" style="padding: 0.15rem 0.45rem; font-size: 0.72rem; color: #e11d48; border: 1px solid #fecdd3; background: #fff1f2; border-radius: 6px; cursor: pointer;" 
+                        data-action="remove-standard" data-id="${escapeHtml(s.id || s.code)}">삭제</button>
               </div>
             `).join("")}
           </div>
-        `}
+        </div>
       </div>
 
-      <!-- 4) 국가 교육과정 성취기준 검색 및 전체 과목 선택 (P0 #6) -->
-      <div style="background: #ffffff; border: 1.5px solid #e2e8f0; padding: 1.2rem; border-radius: 16px;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem; flex-wrap: wrap; gap: 0.4rem;">
-          <div>
-            <span style="font-family: 'Jua', sans-serif; font-size: 1.05rem; color: var(--text-main);">
-              국가 교육과정 성취기준 목록에서 찾기
+      <!-- 오른쪽 칼럼: 교육과정 검색 및 페이지네이션 목록 -->
+      <div class="std-col-right">
+        <div class="std-curriculum-panel">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.35rem; flex-wrap: wrap;">
+            <span style="font-family: 'Jua', sans-serif; font-size: 0.94rem; color: var(--text-main);">
+              ${escapeHtml(appState.plan.schoolLevel)} 교육과정 검색
             </span>
-            <span style="font-size: 0.8rem; color: #64748b; margin-left: 0.5rem;">
-              ${escapeHtml(appState.plan.schoolLevel)} 교육과정 (${allStandards.length}개 기준)
+            <span style="font-size: 0.76rem; color: #64748b;">
+              전체 ${filteredList.length}건 중 ${filteredList.length > 0 ? (page - 1) * pageSize + 1 : 0}~${Math.min(page * pageSize, filteredList.length)}건
             </span>
           </div>
-          <span id="standardsCurriculumCount" style="font-size: 0.82rem; color: #64748b; font-weight: 600;">
-            전체 ${filteredList.length}건 중 ${displayList.length}건 표시
-          </span>
-        </div>
 
-        <!-- 검색창 및 전체 과목 드롭다운 (51개 전 과목 접근 가능) -->
-        <div style="display: flex; gap: 0.6rem; margin-bottom: 0.8rem; flex-wrap: wrap; align-items: center;">
-          <input type="text" class="soft-text-input" id="standardsSearchField" style="flex: 1; min-width: 220px; padding: 0.75rem 1rem; font-size: 0.95rem;"
-                 placeholder="성취기준 코드 또는 검색어 입력 (예: 구매, 인사, 안전, 화폐 등)" 
-                 value="${escapeHtml(appState.plan.standardsSearchKeyword)}" 
-                 data-model="standardsSearchKeyword">
-          
-          <div style="display: flex; align-items: center; gap: 0.4rem;">
-            <label for="standardsSubjectSelect" style="font-size: 0.85rem; font-weight: 700; color: #475569; white-space: nowrap;">과목 필터:</label>
-            <select id="standardsSubjectSelect" class="standards-subject-select">
+          <!-- 검색 및 과목 셀렉트 -->
+          <div style="display: flex; gap: 0.4rem; margin-bottom: 0.4rem;">
+            <input type="text" class="soft-text-input" id="standardsSearchField" style="flex: 1; padding: 0.5rem 0.8rem; font-size: 0.86rem;"
+                   placeholder="검색어 (구매, 인사, 안전 등)" 
+                   value="${escapeHtml(appState.plan.standardsSearchKeyword)}" 
+                   data-model="standardsSearchKeyword">
+            <select id="standardsSubjectSelect" class="standards-subject-select" style="padding: 0.45rem 0.7rem; font-size: 0.82rem;">
               ${allSubjects.map(subj => `
                 <option value="${escapeHtml(subj)}" ${subjectFilter === subj ? 'selected' : ''}>
                   ${escapeHtml(subj)}
@@ -1094,66 +1189,61 @@ function renderStep3(pill, title, subtitle, box) {
               `).join("")}
             </select>
           </div>
-        </div>
 
-        <!-- 주요 과목 빠른 필터 칩 (처음 8개) -->
-        <div style="display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.9rem;">
-          ${allSubjects.slice(0, 8).map(subj => `
-            <button type="button" class="pill-option-btn ${subjectFilter === subj ? 'selected' : ''}" 
-                    style="padding: 0.25rem 0.75rem; font-size: 0.8rem;"
-                    data-action="filter-standards-subject" data-val="${escapeHtml(subj)}">
-              ${escapeHtml(subj)}
-            </button>
-          `).join("")}
-        </div>
-
-        <!-- 성취기준 카드 리스트 -->
-        <div class="standards-bubble-list" id="standardsCurriculumList">
-          ${displayList.length === 0 ? `
-            <div class="empty-state-box">
-              일치하는 성취기준이 없습니다. 상단 '성취기준 넣기'를 통해 직접 등록하실 수 있습니다.
-            </div>
-          ` : displayList.map(std => {
-            const isSelected = selectedCodes.includes(std.code);
-            return `
-              <div class="standard-pick-item ${isSelected ? 'selected' : ''}" 
-                   role="button" tabindex="0" aria-pressed="${isSelected}"
-                   data-action="toggle-standard" data-id="${escapeHtml(std.code)}">
-                <div style="display: flex; flex-direction: column; gap: 0.35rem; flex: 1; text-align: left;">
-                  <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
-                    <span class="std-code-badge">${escapeHtml(std.code)}</span>
-                    <span style="font-size: 0.78rem; background: #f1f5f9; color: #0f172a; padding: 0.15rem 0.6rem; border-radius: 9999px; font-weight: 700; border: 1px solid #e2e8f0;">${escapeHtml(std.subject)}</span>
-                    <span style="font-weight: 800; font-size: 0.96rem; color: #0f172a;">${escapeHtml(std.title)}</span>
-                  </div>
-                  <div style="font-size: 0.92rem; color: #334155; line-height: 1.55; word-break: keep-all;">${escapeHtml(std.desc)}</div>
-                </div>
-                <div style="margin-left: 0.8rem;">
-                  <span style="font-family: 'Jua', sans-serif; font-size: 0.92rem; color: ${isSelected ? '#0f172a' : '#64748b'}; padding: 0.35rem 0.85rem; border-radius: 9999px; background: ${isSelected ? '#e2e8f0' : '#f8fafc'}; border: 1px solid ${isSelected ? '#cbd5e1' : '#e2e8f0'};">
-                    ${isSelected ? '선택됨 ✓' : '+ 추가'}
-                  </span>
-                </div>
+          <!-- 성취기준 카드 리스트 (페이지네이션) -->
+          <div class="std-curriculum-list-paginated" id="standardsCurriculumList">
+            ${pageList.length === 0 ? `
+              <div style="font-size: 0.84rem; color: #94a3b8; text-align: center; padding: 1.5rem 0;">
+                일치하는 성취기준이 없습니다.
               </div>
-            `;
-          }).join("")}
-        </div>
+            ` : pageList.map(std => {
+              const isSelected = selectedCodes.includes(std.code);
+              return `
+                <div class="standard-pick-item ${isSelected ? 'selected' : ''}" 
+                     role="button" tabindex="0" aria-pressed="${isSelected}"
+                     data-action="toggle-standard" data-id="${escapeHtml(std.code)}"
+                     style="padding: 0.6rem 0.8rem;">
+                  <div style="display: flex; flex-direction: column; gap: 0.15rem; flex: 1; text-align: left; overflow: hidden;">
+                    <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">
+                      <span class="std-code-badge" style="font-size: 0.8rem;">${escapeHtml(std.code)}</span>
+                      <span style="font-size: 0.7rem; background: #f1f5f9; color: #0f172a; padding: 0.1rem 0.45rem; border-radius: 9999px; font-weight: 700; border: 1px solid #e2e8f0;">${escapeHtml(std.subject)}</span>
+                      <span style="font-weight: 800; font-size: 0.86rem; color: #0f172a;">${escapeHtml(std.title)}</span>
+                    </div>
+                    <div style="font-size: 0.82rem; color: #334155; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">${escapeHtml(std.desc)}</div>
+                  </div>
+                  <div style="margin-left: 0.4rem;">
+                    <span style="font-family: 'Jua', sans-serif; font-size: 0.8rem; color: ${isSelected ? '#0f172a' : '#64748b'}; padding: 0.2rem 0.6rem; border-radius: 9999px; background: ${isSelected ? '#e2e8f0' : '#f8fafc'}; border: 1px solid ${isSelected ? '#cbd5e1' : '#e2e8f0'}; white-space: nowrap;">
+                      ${isSelected ? '선택됨 ✓' : '+ 추가'}
+                    </span>
+                  </div>
+                </div>
+              `;
+            }).join("")}
+          </div>
 
-        <!-- 더 보기 버튼 (P0 #6) -->
-        ${filteredList.length > displayList.length ? `
-          <button type="button" class="btn-load-more" data-action="load-more-standards">
-            성취기준 더 보기 (+20건) — 남은 기준: ${filteredList.length - displayList.length}건
-          </button>
-        ` : ''}
+          <!-- 페이지네이션 컨트롤 바 -->
+          <div class="std-pagination-bar">
+            <button type="button" class="btn-page-step" data-action="page-standards-prev" ${page <= 1 ? 'disabled' : ''}>
+              &lt; 이전
+            </button>
+            <span style="font-family: 'Jua', sans-serif; font-size: 0.85rem; color: #475569;">
+              ${page} / ${totalPages} 페이지
+            </span>
+            <button type="button" class="btn-page-step" data-action="page-standards-next" ${page >= totalPages ? 'disabled' : ''}>
+              다음 &gt;
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   `;
 }
 
 // ----------------------------------------------------------------------------
-// 교육과정 성취기준 실시간 필터링 업데이트 (P0 #6)
+// 교육과정 성취기준 실시간 필터링 업데이트
 // ----------------------------------------------------------------------------
 function updateCurriculumStandardsList() {
   const container = document.getElementById("standardsCurriculumList");
-  const countLabel = document.getElementById("standardsCurriculumCount");
   if (!container) return;
 
   const allStandards = getStandardsForSchoolLevel(appState.plan.schoolLevel);
@@ -1171,93 +1261,117 @@ function updateCurriculumStandardsList() {
            s.subject.toLowerCase().includes(keyword);
   });
 
-  const displayList = filtered.slice(0, appState.standardsDisplayLimit);
-
-  if (countLabel) {
-    countLabel.textContent = `전체 ${filtered.length}건 중 ${displayList.length}건 표시`;
+  const pageSize = appState.standardsPageSize || 4;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  if (appState.standardsCurriculumPage > totalPages) {
+    appState.standardsCurriculumPage = totalPages;
   }
+  const page = appState.standardsCurriculumPage || 1;
+  const startIdx = (page - 1) * pageSize;
+  const pageList = filtered.slice(startIdx, startIdx + pageSize);
 
-  if (displayList.length === 0) {
-    container.innerHTML = `
-      <div class="empty-state-box">
-        일치하는 성취기준이 없습니다. 상단 '성취기준 넣기'를 통해 직접 등록하실 수 있습니다.
-      </div>
-    `;
-    return;
-  }
-
-  container.innerHTML = displayList.map(std => {
-    const isSelected = selectedCodes.includes(std.code);
-    return `
-      <div class="standard-pick-item ${isSelected ? 'selected' : ''}" 
-           role="button" tabindex="0" aria-pressed="${isSelected}"
-           data-action="toggle-standard" data-id="${escapeHtml(std.code)}">
-        <div style="display: flex; flex-direction: column; gap: 0.35rem; flex: 1; text-align: left;">
-          <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
-            <span class="std-code-badge">${escapeHtml(std.code)}</span>
-            <span style="font-size: 0.78rem; background: #f1f5f9; color: #0f172a; padding: 0.15rem 0.6rem; border-radius: 9999px; font-weight: 700; border: 1px solid #e2e8f0;">${escapeHtml(std.subject)}</span>
-            <span style="font-weight: 800; font-size: 0.96rem; color: #0f172a;">${escapeHtml(std.title)}</span>
-          </div>
-          <div style="font-size: 0.92rem; color: #334155; line-height: 1.55; word-break: keep-all;">${escapeHtml(std.desc)}</div>
-        </div>
-        <div style="margin-left: 0.8rem;">
-          <span style="font-family: 'Jua', sans-serif; font-size: 0.92rem; color: ${isSelected ? '#0f172a' : '#64748b'}; padding: 0.35rem 0.85rem; border-radius: 9999px; background: ${isSelected ? '#e2e8f0' : '#f8fafc'}; border: 1px solid ${isSelected ? '#cbd5e1' : '#e2e8f0'};">
-            ${isSelected ? '선택됨 ✓' : '+ 추가'}
-          </span>
-        </div>
-      </div>
-    `;
-  }).join("");
-
-  // 더 보기 버튼 갱신
-  let moreBtn = container.parentElement.querySelector(".btn-load-more");
-  if (filtered.length > displayList.length) {
-    if (!moreBtn) {
-      moreBtn = document.createElement("button");
-      moreBtn.type = "button";
-      moreBtn.className = "btn-load-more";
-      moreBtn.setAttribute("data-action", "load-more-standards");
-      container.parentElement.appendChild(moreBtn);
+  const panelHeader = container.closest(".std-curriculum-panel");
+  if (panelHeader) {
+    const countSpan = panelHeader.querySelector("span:nth-child(2)");
+    if (countSpan) {
+      countSpan.textContent = `전체 ${filtered.length}건 중 ${filtered.length > 0 ? (page - 1) * pageSize + 1 : 0}~${Math.min(page * pageSize, filtered.length)}건`;
     }
-    moreBtn.textContent = `성취기준 더 보기 (+20건) — 남은 기준: ${filtered.length - displayList.length}건`;
-  } else if (moreBtn) {
-    moreBtn.remove();
+  }
+
+  if (pageList.length === 0) {
+    container.innerHTML = `
+      <div style="font-size: 0.84rem; color: #94a3b8; text-align: center; padding: 1.5rem 0;">
+        일치하는 성취기준이 없습니다.
+      </div>
+    `;
+  } else {
+    container.innerHTML = pageList.map(std => {
+      const isSelected = selectedCodes.includes(std.code);
+      return `
+        <div class="standard-pick-item ${isSelected ? 'selected' : ''}" 
+             role="button" tabindex="0" aria-pressed="${isSelected}"
+             data-action="toggle-standard" data-id="${escapeHtml(std.code)}"
+             style="padding: 0.6rem 0.8rem;">
+          <div style="display: flex; flex-direction: column; gap: 0.15rem; flex: 1; text-align: left; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap;">
+              <span class="std-code-badge" style="font-size: 0.8rem;">${escapeHtml(std.code)}</span>
+              <span style="font-size: 0.7rem; background: #f1f5f9; color: #0f172a; padding: 0.1rem 0.45rem; border-radius: 9999px; font-weight: 700; border: 1px solid #e2e8f0;">${escapeHtml(std.subject)}</span>
+              <span style="font-weight: 800; font-size: 0.86rem; color: #0f172a;">${escapeHtml(std.title)}</span>
+            </div>
+            <div style="font-size: 0.82rem; color: #334155; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">${escapeHtml(std.desc)}</div>
+          </div>
+          <div style="margin-left: 0.4rem;">
+            <span style="font-family: 'Jua', sans-serif; font-size: 0.8rem; color: ${isSelected ? '#0f172a' : '#64748b'}; padding: 0.2rem 0.6rem; border-radius: 9999px; background: ${isSelected ? '#e2e8f0' : '#f8fafc'}; border: 1px solid ${isSelected ? '#cbd5e1' : '#e2e8f0'}; white-space: nowrap;">
+              ${isSelected ? '선택됨 ✓' : '+ 추가'}
+            </span>
+          </div>
+        </div>
+      `;
+    }).join("");
+  }
+
+  const paginationBar = panelHeader ? panelHeader.querySelector(".std-pagination-bar") : null;
+  if (paginationBar) {
+    paginationBar.innerHTML = `
+      <button type="button" class="btn-page-step" data-action="page-standards-prev" ${page <= 1 ? 'disabled' : ''}>
+        &lt; 이전
+      </button>
+      <span style="font-family: 'Jua', sans-serif; font-size: 0.85rem; color: #475569;">
+        ${page} / ${totalPages} 페이지
+      </span>
+      <button type="button" class="btn-page-step" data-action="page-standards-next" ${page >= totalPages ? 'disabled' : ''}>
+        다음 &gt;
+      </button>
+    `;
   }
 }
 
 // ----------------------------------------------------------------------------
-// 4단계: 체험학습 주제 선택
+// 4단계: 체험학습 주제 선택 (실시간 맥락 추천 + 회전 보기)
 // ----------------------------------------------------------------------------
 function renderStep4(pill, title, subtitle, box) {
   pill.textContent = "4단계: 체험학습 주제";
   title.textContent = "어떤 배움의 주제로 프로젝트를 열어갈까요?";
-  subtitle.textContent = "선택하신 장소와 성취기준을 연결한 추천 주제입니다. 마음에 드는 주제를 고르거나 직접 다듬어 주세요.";
+  subtitle.textContent = "선택하신 장소와 성취기준을 연결한 실시간 맞춤 주제입니다. 마음에 드는 주제를 고르거나 직접 수정할 수 있습니다.";
 
-  const suggestions = THEME_SUGGESTIONS[appState.plan.locationId] || [
-    "스스로 탐색하고 실천하는 우리 마을 배움 여행",
-    "공공장소 에티켓과 자립 기능을 기르는 현장 체험",
-    "친구와 함께 협력하여 미션을 완수하는 배움 원정대"
-  ];
+  const suggestions = recommendThemes(appState.plan, { cycleIndex: appState.themeCycleIndex || 0 });
 
   box.innerHTML = `
-    <div class="choice-grid-cards" style="grid-template-columns: 1fr;">
-      ${suggestions.map((thm, i) => `
-        <div class="choice-bubble-card ${appState.plan.theme === thm ? 'selected' : ''}" 
-             role="button" tabindex="0" aria-pressed="${appState.plan.theme === thm}"
-             data-action="select-theme" data-val="${escapeHtml(thm)}">
+    <div class="theme-header-row">
+      <span style="font-family: 'Jua', sans-serif; font-size: 0.98rem; color: var(--text-main); display: flex; align-items: center; gap: 0.4rem;">
+        <span>🎯</span> 맥락 연계 실시간 추천 주제
+      </span>
+      <button type="button" class="btn-cycle-themes" data-action="cycle-themes" title="다른 추천 후보들을 새로고침합니다">
+        <span>🔄</span> 다른 추천 보기
+      </button>
+    </div>
+
+    <div class="choice-grid-cards" data-cols="2" style="gap: 0.65rem; margin-bottom: 0.6rem;">
+      ${suggestions.slice(0, 4).map((thm, i) => `
+        <div class="choice-bubble-card ${appState.plan.theme === thm.theme ? 'selected' : ''}" 
+             role="button" tabindex="0" aria-pressed="${appState.plan.theme === thm.theme}"
+             data-action="select-theme" data-val="${escapeHtml(thm.theme)}"
+             style="padding: 0.8rem 1rem;">
           <div class="choice-card-top">
-            <span class="choice-card-badge">추천 주제 0${i + 1}</span>
+            <span class="choice-card-badge">추천 0${i + 1}</span>
+            <span class="theme-reason-tag">${escapeHtml(thm.reasonBadge)}</span>
           </div>
-          <h2 class="choice-card-title">${escapeHtml(thm)}</h2>
-          <p class="choice-card-desc">실생활 맥락 중심의 학생 주도형 ${escapeHtml(appState.plan.schoolLevel)} 체험 프로젝트</p>
+          <h2 class="choice-card-title" style="font-size: 1.05rem;">${escapeHtml(thm.theme)}</h2>
+          <p class="choice-card-desc" style="font-size: 0.82rem;">${escapeHtml(appState.plan.schoolLevel)} 실생활 맥락 중심 배움 프로젝트</p>
         </div>
       `).join("")}
     </div>
-    <div class="soft-input-group">
-      <label for="themeInput" style="font-size: 0.92rem; font-weight: 700; color: var(--text-muted);">주제 직접 수정하기:</label>
+
+    <!-- 주제 직접 수정 -->
+    <div class="soft-input-group" style="margin-top: 0.2rem;">
+      <label for="themeInput" style="font-size: 0.88rem; font-weight: 700; color: var(--text-muted); display: flex; align-items: center; gap: 0.4rem;">
+        <span class="label-badge" style="font-size: 0.72rem;">직접 수정</span>
+        주제 직접 수정 및 보완:
+      </label>
       <input type="text" class="soft-text-input" id="themeInput"
              value="${escapeHtml(appState.plan.theme)}" 
-             data-model="theme">
+             data-model="theme"
+             style="padding: 0.7rem 1.1rem; font-size: 1rem;">
     </div>
   `;
 }
@@ -1319,21 +1433,22 @@ function renderStep5(pill, title, subtitle, box) {
       <!-- 차시 수 직접 입력 및 4:2:4 비율 시각화 영역 -->
       <div class="selector-sub-box">
         <h3 class="sub-box-title">수업 운영 차시 수 (직접 입력 / 빠른 선택):</h3>
-        <div style="display: flex; align-items: center; gap: 0.8rem; margin-top: 0.4rem;">
+        <div style="display: flex; align-items: center; gap: 0.8rem; margin-top: 0.2rem;">
           <input type="number" min="1" max="30" class="soft-text-input" id="periodCountInput"
-                 style="width: 110px; font-size: 1.4rem; font-family: 'Jua', sans-serif; text-align: center; padding: 0.6rem;" 
+                 style="width: 110px; font-size: 1.35rem; font-family: 'Jua', sans-serif; text-align: center; padding: 0.5rem;" 
                  value="${escapeHtml(appState.plan.periodCount)}" 
                  data-model="periodCount">
-          <span style="font-family: 'Jua', sans-serif; font-size: 1.3rem; color: var(--primary-accent);">차시</span>
+          <span style="font-family: 'Jua', sans-serif; font-size: 1.25rem; color: var(--primary-accent);">차시</span>
         </div>
 
-        <div style="font-size: 0.88rem; color: var(--text-muted); margin-top: 0.5rem;">
+        <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 0.35rem;">
           자주 사용하는 차시 빠른 선택:
         </div>
         <div class="pill-option-group">
           ${quickOptions.map(opt => `
             <button type="button" class="pill-option-btn ${appState.plan.periodCount === opt.count ? 'selected' : ''}" 
                     aria-pressed="${appState.plan.periodCount === opt.count}"
+                    style="padding: 0.45rem 0.95rem; font-size: 0.88rem;"
                     data-action="select-period-count" data-val="${opt.count}">
               ${escapeHtml(opt.label)}
             </button>
@@ -1349,16 +1464,16 @@ function renderStep5(pill, title, subtitle, box) {
       <!-- 난이도 선택 영역 -->
       <div class="selector-sub-box">
         <h3 class="sub-box-title">수업 수준 (난이도 및 촉진 지원):</h3>
-        <div style="display: flex; flex-direction: column; gap: 0.65rem;">
+        <div style="display: flex; flex-direction: column; gap: 0.5rem;">
           ${levels.map(lvl => {
             const isSel = appState.plan.difficultyLevel.includes(lvl.title);
             return `
               <div class="choice-bubble-card ${isSel ? 'selected' : ''}" 
                    role="button" tabindex="0" aria-pressed="${isSel}"
-                   style="padding: 0.95rem 1.1rem;" 
+                   style="padding: 0.8rem 1rem;" 
                    data-action="select-difficulty" data-val="${escapeHtml(`${lvl.title} (${lvl.desc})`)}">
-                <span style="font-family: 'Jua', sans-serif; font-size: 1.1rem; color: var(--text-main);">${escapeHtml(lvl.title)}</span>
-                <span style="font-size: 0.84rem; color: var(--text-muted);">${escapeHtml(lvl.desc)}</span>
+                <span style="font-family: 'Jua', sans-serif; font-size: 1.05rem; color: var(--text-main);">${escapeHtml(lvl.title)}</span>
+                <span style="font-size: 0.82rem; color: var(--text-muted);">${escapeHtml(lvl.desc)}</span>
               </div>
             `;
           }).join("")}
@@ -1376,8 +1491,8 @@ function getRatioBannerHtml(periodCount) {
   const postPct = 100 - prePct - fieldPct;
 
   return `
-    <div class="ratio-banner-box" style="margin-top: 0.8rem;">
-      <div style="font-family: 'Jua', sans-serif; font-size: 0.96rem; color: var(--text-main); display: flex; justify-content: space-between;">
+    <div class="ratio-banner-box" style="margin-top: 0.6rem;">
+      <div style="font-family: 'Jua', sans-serif; font-size: 0.92rem; color: var(--text-main); display: flex; justify-content: space-between;">
         <span>🎯 차시 배분 비율: 사전 4 : 현장 2 : 사후 4</span>
         <span style="color: var(--primary-accent); font-weight: 800;">총 ${total}차시</span>
       </div>
@@ -1386,7 +1501,7 @@ function getRatioBannerHtml(periodCount) {
         <div class="ratio-bar-segment field" style="width: ${fieldPct}%;"></div>
         <div class="ratio-bar-segment post" style="width: ${postPct}%;"></div>
       </div>
-      <div class="ratio-legend-row">
+      <div class="ratio-legend-row" style="font-size: 0.82rem;">
         <span style="color: #be123c;">🌸 사전 ${counts.pre}차시 (${prePct}%)</span>
         <span style="color: #0369a1;">🚌 현장 ${counts.field}차시 (${fieldPct}%)</span>
         <span style="color: #15803d;">🌱 사후 ${counts.post}차시 (${postPct}%)</span>
@@ -1403,57 +1518,88 @@ function updatePeriodRatioVisualizer() {
 }
 
 // ----------------------------------------------------------------------------
-// 6단계: 평가 중점 선택
+// 6단계: 평가 중점 선택 (4개 1줄 무스크롤 + 10개 더보기 토글)
 // ----------------------------------------------------------------------------
 function renderStep6(pill, title, subtitle, box) {
   pill.textContent = "6단계: 평가 중점 선택";
   title.textContent = "이번 체험학습에서 가장 중요하게 평가할 영역은 무엇인가요?";
-  subtitle.textContent = "핵심 성취기준 및 학생 특성과 연결된 핵심 평가 관점을 선택해 주세요.";
+  subtitle.textContent = "핵심 성취기준 및 학생 특성과 연결된 평가 관점입니다. 이전 단계 내용이 실시간 반영되었습니다.";
+
+  const allFocus = recommendEvalFocus(appState.plan);
+  const showAll = Boolean(appState.showAllEvalFocus);
+  const displayItems = showAll ? allFocus : allFocus.slice(0, 4);
+
+  // 현재 선택된 평가 관점이 상위 4개에 없어도 보존
+  if (!showAll && !displayItems.some(item => item.id === appState.plan.evalFocusId)) {
+    const selectedItem = allFocus.find(item => item.id === appState.plan.evalFocusId);
+    if (selectedItem) {
+      displayItems[3] = selectedItem;
+    }
+  }
 
   box.innerHTML = `
-    <div class="choice-grid-cards">
-      ${EVALUATION_FOCUS_OPTIONS.map(ef => `
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.45rem;">
+      <span style="font-family: 'Jua', sans-serif; font-size: 0.98rem; color: var(--text-main); display: flex; align-items: center; gap: 0.4rem;">
+        <span>🎯</span> 맥락 최적화 평가 관점 (${escapeHtml(appState.plan.locationName)} &amp; ${escapeHtml(appState.plan.schoolLevel)})
+      </span>
+      <span style="font-size: 0.78rem; color: #64748b;">
+        ${showAll ? '전체 10개 평가 관점 표시 중' : '핵심 4선 한눈에 보기'}
+      </span>
+    </div>
+
+    <div class="choice-grid-cards" data-cols="${showAll ? '3' : '4'}" style="${showAll ? 'max-height: 380px; overflow-y: auto;' : ''}">
+      ${displayItems.map(ef => `
         <div class="choice-bubble-card ${appState.plan.evalFocusId === ef.id ? 'selected' : ''}" 
              role="button" tabindex="0" aria-pressed="${appState.plan.evalFocusId === ef.id}"
-             data-action="select-eval-focus" data-id="${escapeHtml(ef.id)}" data-val="${escapeHtml(ef.title)}">
+             data-action="select-eval-focus" data-id="${escapeHtml(ef.id)}" data-val="${escapeHtml(ef.title)}"
+             style="padding: 0.8rem 1rem;">
           <div class="choice-card-top">
-            <span class="choice-card-badge">평가 관점</span>
+            <span class="choice-card-badge">${escapeHtml(ef.reasonBadge)}</span>
           </div>
-          <h2 class="choice-card-title">${escapeHtml(ef.title)}</h2>
-          <p class="choice-card-desc">${escapeHtml(ef.desc)}</p>
+          <h2 class="choice-card-title" style="font-size: 1.05rem;">${escapeHtml(ef.title)}</h2>
+          <p class="choice-card-desc" style="font-size: 0.82rem;">${escapeHtml(ef.desc)}</p>
         </div>
       `).join("")}
+    </div>
+
+    <div class="other-options-drawer-bar">
+      <span style="font-size: 0.8rem; color: #64748b;">
+        * 평가 중점을 선택하면 7단계 학습 목표(지식·기능·태도)가 실시간 자동 작성됩니다.
+      </span>
+      <button type="button" class="btn-toggle-drawer" data-action="toggle-all-eval-focus">
+        ${showAll ? '접기 (추천 4선만 보기)' : '다른 평가 영역 더 보기 (전체 10개) ▾'}
+      </button>
     </div>
   `;
 }
 
 // ----------------------------------------------------------------------------
-// 7단계: 학습 목표 설정
+// 7단계: 학습 목표 설정 (동적 자동 완성 및 컴팩트 뷰)
 // ----------------------------------------------------------------------------
 function renderStep7(pill, title, subtitle, box) {
   pill.textContent = "7단계: 체험학습 목표 설정";
   title.textContent = "설정한 평가 중점에 맞춘 3차원 학습 목표입니다.";
-  subtitle.textContent = "지식·기능·태도 측면에서 학생들이 도달할 구체적인 수업 목표를 확인하고 필요시 다듬어 주세요.";
+  subtitle.textContent = "지식·기능·태도 측면에서 도달할 구체적인 수업 목표입니다. 실시간 분석으로 자동 완성되었으며 필요시 직접 수정할 수 있습니다.";
 
   box.innerHTML = `
-    <div style="display: flex; flex-direction: column; gap: 1rem;">
-      <div class="choice-bubble-card selected" style="cursor: default;">
-        <label for="goalKnowledgeInput" style="font-family: 'Jua', sans-serif; font-size: 0.95rem; color: var(--primary-accent); display: block; margin-bottom: 0.3rem;">[지식·이해 목표]</label>
-        <input type="text" class="soft-text-input" id="goalKnowledgeInput" style="padding: 0.75rem 1rem; font-size: 1rem;" 
+    <div style="display: flex; flex-direction: column; gap: 0.75rem;">
+      <div class="choice-bubble-card selected" style="cursor: default; padding: 0.85rem 1.15rem;">
+        <label for="goalKnowledgeInput" style="font-family: 'Jua', sans-serif; font-size: 0.92rem; color: var(--primary-accent); display: block; margin-bottom: 0.25rem;">[지식·이해 목표]</label>
+        <input type="text" class="soft-text-input" id="goalKnowledgeInput" style="padding: 0.65rem 0.95rem; font-size: 0.96rem;" 
                value="${escapeHtml(appState.plan.goalKnowledge)}" 
                data-model="goalKnowledge">
       </div>
 
-      <div class="choice-bubble-card selected" style="cursor: default;">
-        <label for="goalSkillInput" style="font-family: 'Jua', sans-serif; font-size: 0.95rem; color: #10b981; display: block; margin-bottom: 0.3rem;">[기능·수행 목표]</label>
-        <input type="text" class="soft-text-input" id="goalSkillInput" style="padding: 0.75rem 1rem; font-size: 1rem;" 
+      <div class="choice-bubble-card selected" style="cursor: default; padding: 0.85rem 1.15rem;">
+        <label for="goalSkillInput" style="font-family: 'Jua', sans-serif; font-size: 0.92rem; color: #10b981; display: block; margin-bottom: 0.25rem;">[기능·수행 목표]</label>
+        <input type="text" class="soft-text-input" id="goalSkillInput" style="padding: 0.65rem 0.95rem; font-size: 0.96rem;" 
                value="${escapeHtml(appState.plan.goalSkill)}" 
                data-model="goalSkill">
       </div>
 
-      <div class="choice-bubble-card selected" style="cursor: default;">
-        <label for="goalAttitudeInput" style="font-family: 'Jua', sans-serif; font-size: 0.95rem; color: #a855f7; display: block; margin-bottom: 0.3rem;">[가치·태도 목표]</label>
-        <input type="text" class="soft-text-input" id="goalAttitudeInput" style="padding: 0.75rem 1rem; font-size: 1rem;" 
+      <div class="choice-bubble-card selected" style="cursor: default; padding: 0.85rem 1.15rem;">
+        <label for="goalAttitudeInput" style="font-family: 'Jua', sans-serif; font-size: 0.92rem; color: #a855f7; display: block; margin-bottom: 0.25rem;">[가치·태도 목표]</label>
+        <input type="text" class="soft-text-input" id="goalAttitudeInput" style="padding: 0.65rem 0.95rem; font-size: 0.96rem;" 
                value="${escapeHtml(appState.plan.goalAttitude)}" 
                data-model="goalAttitude">
       </div>
@@ -1470,60 +1616,91 @@ function renderStep8(pill, title, subtitle, box) {
   subtitle.textContent = "이동 지원(휠체어), 감각 조절, 의사소통 보조 등 안전하고 편안한 배움을 위해 필요한 지원을 적어주세요.";
 
   box.innerHTML = `
-    <div class="privacy-notice-bubble">
+    <div class="privacy-notice-bubble" style="padding: 0.8rem 1.1rem; margin-bottom: 0.65rem;">
       <span class="privacy-notice-badge">개인정보 주의</span>
-      <span>
-        <strong>개인식별정보 입력 절대 금지:</strong> 학생 실명, 전화번호, 주민등록번호는 절대 입력하지 마세요! 
-        (예: "휠체어 이동 지원 1명", "시각적 일과표 2명", "소음 민감성 1명" 형태로만 기재)
+      <span style="font-size: 0.86rem;">
+        <strong>개인식별정보 입력 절대 금지:</strong> 학생 실명, 전화번호는 절대 입력 금지! 
+        (예: "휠체어 이동 지원 1명", "시각적 일과표 2명" 형태로만 기재)
       </span>
     </div>
 
-    <div style="font-family: 'Jua', sans-serif; font-size: 1rem; color: var(--text-main); margin-bottom: 0.5rem;">
+    <div style="font-family: 'Jua', sans-serif; font-size: 0.95rem; color: var(--text-main); margin-bottom: 0.4rem;">
       자주 활용되는 기능적 지원 요구 태그 (클릭 시 추가):
     </div>
-    <div class="pill-option-group" style="margin-bottom: 1rem;">
-      <button type="button" class="pill-option-btn" data-action="add-functional-tag" data-val="휠체어 이동 지원 1명 (무단차 경사로 필요)">+ 휠체어 이동 지원</button>
-      <button type="button" class="pill-option-btn" data-action="add-functional-tag" data-val="시각적 단계별 일과표 및 사진 단서 필요 2명">+ 시각적 일과표</button>
-      <button type="button" class="pill-option-btn" data-action="add-functional-tag" data-val="AAC 그림 상징판 및 스마트 보완의사소통 지원 1명">+ AAC 의사소통</button>
-      <button type="button" class="pill-option-btn" data-action="add-functional-tag" data-val="소음 민감성 대비 저소음 휴식 쉼터 동선 1명">+ 소음 감각 조절</button>
-      <button type="button" class="pill-option-btn" data-action="add-functional-tag" data-val="돌발 이탈 예방 1:1 보조인력 밀착 동행 1명">+ 1:1 안전 동행</button>
+    <div class="pill-option-group" style="margin-bottom: 0.8rem;">
+      <button type="button" class="pill-option-btn" style="padding: 0.45rem 0.9rem; font-size: 0.88rem;" data-action="add-functional-tag" data-val="휠체어 이동 지원 1명 (무단차 경사로 필요)">+ 휠체어 이동 지원</button>
+      <button type="button" class="pill-option-btn" style="padding: 0.45rem 0.9rem; font-size: 0.88rem;" data-action="add-functional-tag" data-val="시각적 단계별 일과표 및 사진 단서 필요 2명">+ 시각적 일과표</button>
+      <button type="button" class="pill-option-btn" style="padding: 0.45rem 0.9rem; font-size: 0.88rem;" data-action="add-functional-tag" data-val="AAC 그림 상징판 및 스마트 보완의사소통 지원 1명">+ AAC 의사소통</button>
+      <button type="button" class="pill-option-btn" style="padding: 0.45rem 0.9rem; font-size: 0.88rem;" data-action="add-functional-tag" data-val="소음 민감성 대비 저소음 휴식 쉼터 동선 1명">+ 소음 감각 조절</button>
+      <button type="button" class="pill-option-btn" style="padding: 0.45rem 0.9rem; font-size: 0.88rem;" data-action="add-functional-tag" data-val="돌발 이탈 예방 1:1 보조인력 밀착 동행 1명">+ 1:1 안전 동행</button>
     </div>
 
-    <div class="soft-input-group">
-      <label for="functionalNeedsArea" style="font-size: 0.92rem; font-weight: 700; color: var(--text-muted);">현재 등록된 맞춤 지원 사항:</label>
-      <textarea class="soft-text-input" id="functionalNeedsArea" rows="4" style="line-height: 1.5; resize: none;" 
+    <div class="soft-input-group" style="margin-top: 0.2rem;">
+      <label for="functionalNeedsArea" style="font-size: 0.88rem; font-weight: 700; color: var(--text-muted);">현재 등록된 맞춤 지원 사항:</label>
+      <textarea class="soft-text-input" id="functionalNeedsArea" rows="3" style="line-height: 1.45; resize: none; padding: 0.75rem 1rem; font-size: 0.95rem;" 
                 data-model="functionalNeeds">${escapeHtml(appState.plan.functionalNeeds.join("\n"))}</textarea>
     </div>
   `;
 }
 
 // ----------------------------------------------------------------------------
-// 9단계: 수업 방식 확인
+// 9단계: 수업 방식 확인 (4개 1줄 무스크롤 + 실시간 맥락 합성 + 10개 더보기)
 // ----------------------------------------------------------------------------
 function renderStep9(pill, title, subtitle, box) {
   pill.textContent = "9단계: 수업 방식 확인";
   title.textContent = "어떤 수업 방식으로 배움을 이끌어갈까요?";
-  subtitle.textContent = "프로젝트 학습, 협력학습, 질문식 수업, 직접 시연 수업 중 이번 체험학습의 주요 방식을 선택해 주세요.";
+  subtitle.textContent = "선택하신 장소, 평가중점, 차시, 학생 요구에 맞춘 최적 수업 방식입니다. 이전 단계 내용이 실시간 반영되었습니다.";
+
+  const allMethods = recommendTeachingMethods(appState.plan);
+  const showAll = Boolean(appState.showAllTeachingMethods);
+  const displayItems = showAll ? allMethods : allMethods.slice(0, 4);
+
+  // 현재 선택된 수업 방식이 상위 4개에 없어도 보존
+  if (!showAll && !displayItems.some(item => appState.plan.teachingMethod.includes(item.name))) {
+    const selectedItem = allMethods.find(item => appState.plan.teachingMethod.includes(item.name));
+    if (selectedItem) {
+      displayItems[3] = selectedItem;
+    }
+  }
 
   box.innerHTML = `
-    <div class="choice-grid-cards">
-      ${TEACHING_METHOD_OPTIONS.map(m => `
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.45rem;">
+      <span style="font-family: 'Jua', sans-serif; font-size: 0.98rem; color: var(--text-main); display: flex; align-items: center; gap: 0.4rem;">
+        <span>💡</span> 맞춤 추천 수업 방식 (${escapeHtml(appState.plan.locationName)} &amp; ${escapeHtml(appState.plan.evalFocusTitle)})
+      </span>
+      <span style="font-size: 0.78rem; color: #64748b;">
+        ${showAll ? '전체 10개 교수학습 방식 표시 중' : '핵심 4선 한눈에 보기'}
+      </span>
+    </div>
+
+    <div class="choice-grid-cards" data-cols="${showAll ? '3' : '4'}" style="${showAll ? 'max-height: 380px; overflow-y: auto;' : ''}">
+      ${displayItems.map(m => `
         <div class="choice-bubble-card ${appState.plan.teachingMethod.includes(m.name) ? 'selected' : ''}" 
              role="button" tabindex="0" aria-pressed="${appState.plan.teachingMethod.includes(m.name)}"
-             data-action="select-teaching-method" data-val="${escapeHtml(m.name)}">
+             data-action="select-teaching-method" data-val="${escapeHtml(m.name)}"
+             style="padding: 0.8rem 1rem;">
           <div class="choice-card-top">
             <span class="choice-card-badge">${escapeHtml(m.badge)}</span>
           </div>
-          <h2 class="choice-card-title">${escapeHtml(m.name)}</h2>
-          <p class="choice-card-desc">${escapeHtml(m.desc)}</p>
+          <h2 class="choice-card-title" style="font-size: 1.05rem;">${escapeHtml(m.name)}</h2>
+          <p class="choice-card-desc" style="font-size: 0.82rem;">${escapeHtml(m.desc)}</p>
         </div>
       `).join("")}
+    </div>
+
+    <div class="other-options-drawer-bar">
+      <span style="font-size: 0.8rem; color: #64748b;">
+        * 실제 현장 장소와 수업 주제가 예시 문구에 생생하게 합성되어 반영됩니다.
+      </span>
+      <button type="button" class="btn-toggle-drawer" data-action="toggle-all-teaching-methods">
+        ${showAll ? '접기 (추천 4선만 보기)' : '다른 수업 방식 더 보기 (전체 10개) ▾'}
+      </button>
     </div>
   `;
 }
 
 // ----------------------------------------------------------------------------
-// 10단계: UDL 최종 교육과정 결과물
+// 10단계: UDL 최종 교육과정 결과물 (목차 점프 칩 & 고정 헤더 & 독립 스크롤러)
 // ----------------------------------------------------------------------------
 function renderStep10(pill, title, subtitle, box) {
   pill.textContent = "10단계: UDL 최종 교육과정 결과물";
@@ -1536,19 +1713,30 @@ function renderStep10(pill, title, subtitle, box) {
   const actPack = getActiveActivityPack(p.locationId, p.locationName);
 
   box.innerHTML = `
-    <div class="export-action-shelf">
-      <button type="button" class="btn-bubble-tool" data-action="copy-curriculum">내용 전체 복사</button>
-      <button type="button" class="btn-bubble-tool" style="background: #ffe4e6; color: #e11d48;" data-action="download-hwpx">
-        한글(HWPX) 다운로드
-      </button>
-      <button type="button" class="btn-soft-primary" style="padding: 0.5rem 1.2rem; font-size: 0.88rem;" data-action="print-pdf">
-        PDF 인쇄 / 저장
-      </button>
+    <!-- 10단계 고정 헤더: 목차 바로가기 점프 칩 & 다운로드 도구 모음 -->
+    <div class="step10-fixed-header">
+      <div class="udl-toc-shelf">
+        <span style="font-family: 'Jua', sans-serif; font-size: 0.84rem; color: #64748b; margin-right: 0.1rem;">📌 목차:</span>
+        <button type="button" class="toc-chip-btn" data-action="jump-toc-section" data-id="sec-summary">1. 개요</button>
+        <button type="button" class="toc-chip-btn" data-action="jump-toc-section" data-id="sec-roadmap">2. 차시계획</button>
+        <button type="button" class="toc-chip-btn" data-action="jump-toc-section" data-id="sec-detail">3. 세부계획안</button>
+        <button type="button" class="toc-chip-btn" data-action="jump-toc-section" data-id="sec-materials">4. 자료제작</button>
+      </div>
+      <div class="export-action-shelf">
+        <button type="button" class="btn-bubble-tool" data-action="copy-curriculum" style="font-size: 0.84rem; padding: 0.35rem 0.8rem;">내용 복사</button>
+        <button type="button" class="btn-bubble-tool" style="background: #ffe4e6; color: #e11d48; font-size: 0.84rem; padding: 0.35rem 0.8rem;" data-action="download-hwpx">
+          한글(HWPX) 다운로드
+        </button>
+        <button type="button" class="btn-soft-primary" style="padding: 0.4rem 1.1rem; font-size: 0.85rem;" data-action="print-pdf">
+          PDF 인쇄 / 저장
+        </button>
+      </div>
     </div>
 
+    <!-- 유일하게 스크롤되는 최종 결과물 뷰어 -->
     <div class="udl-result-scroller" id="udlPrintArea">
       <!-- 1) 프로젝트 개요 -->
-      <div class="result-section-box">
+      <div class="result-section-box" id="sec-summary">
         <h2 class="result-section-title">1. 프로젝트 개요</h2>
         <table class="result-table">
           <tbody>
@@ -1577,7 +1765,7 @@ function renderStep10(pill, title, subtitle, box) {
       </div>
 
       <!-- 2) 차시별 수업 계획 (전체 로드맵 표) -->
-      <div class="result-section-box">
+      <div class="result-section-box" id="sec-roadmap">
         <h2 class="result-section-title">2. 차시별 수업 계획 (전체 로드맵 - 사전:현장:사후 4:2:4 비율)</h2>
         ${getRatioBannerHtml(p.periodCount)}
         <table class="result-table">
@@ -1612,7 +1800,7 @@ function renderStep10(pill, title, subtitle, box) {
       </div>
 
       <!-- 3) 차시별 세부 수업 계획안 -->
-      <div class="result-section-box">
+      <div class="result-section-box" id="sec-detail">
         <h2 class="result-section-title">3. 차시별 세부 수업 계획안 (도입-전개-정리 및 발문 예시)</h2>
         ${periods.map(item => {
           const bgMap = {
@@ -1644,7 +1832,7 @@ function renderStep10(pill, title, subtitle, box) {
       </div>
 
       <!-- 4) 교수·학습 자료 제작 지원 -->
-      <div class="result-section-box">
+      <div class="result-section-box" id="sec-materials">
         <h2 class="result-section-title">4. 교수·학습 자료 제작 지원 (PPT 슬라이드 및 활동지)</h2>
         <div style="font-family: 'Jua', sans-serif; font-size: 1.1rem; margin-bottom: 0.5rem; color: var(--text-main);">
           가. 차시별 PPT 슬라이드 구성안:
