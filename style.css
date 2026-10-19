@@ -909,8 +909,20 @@ body {
   .print-only-container {
     display: block !important;
     padding: 20px;
-    font-size: 12pt;
+    font-size: 11pt;
     line-height: 1.6;
+    color: #000000 !important;
+  }
+  .print-only-container tr,
+  .print-only-container .result-table tr,
+  .print-only-container .ppt-slide-card,
+  .print-only-container .result-section-box,
+  .print-only-container .result-section-box > div {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+  .print-only-container thead {
+    display: table-header-group !important;
   }
 }
 
@@ -930,13 +942,137 @@ body {
 }
 
 /* ==========================================================================
+   성취기준 및 입력 공통 컴포넌트 클래스
+   ========================================================================== */
+.input-card-box {
+  background: #ffffff;
+  border: 2px solid #e2e8f0;
+  border-radius: 16px;
+  padding: 1.3rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.02);
+}
+
+.label-badge {
+  background: #e2e8f0;
+  color: #0f172a;
+  padding: 0.2rem 0.6rem;
+  border-radius: var(--radius-full);
+  font-size: 0.8rem;
+  font-family: 'Jua', sans-serif;
+}
+
+.std-current-box {
+  background: #f8fafc;
+  border: 1.5px solid #e2e8f0;
+  padding: 1.2rem;
+  border-radius: 16px;
+}
+
+.std-current-item {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  padding: 0.75rem 1rem;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+}
+
+.empty-state-box {
+  text-align: center;
+  padding: 1.5rem;
+  color: #94a3b8;
+  font-size: 0.92rem;
+  background: #f8fafc;
+  border-radius: 12px;
+  border: 1.5px dashed #cbd5e1;
+}
+
+.recommended-standards-shelf {
+  background: #f0fdf4;
+  border: 1.5px solid #bbf7d0;
+  border-radius: 14px;
+  padding: 1rem 1.2rem;
+  margin-bottom: 0.9rem;
+}
+
+.recommended-standards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 0.6rem;
+  margin-top: 0.6rem;
+}
+
+.rec-std-chip {
+  background: #ffffff;
+  border: 1px solid #86efac;
+  border-radius: 10px;
+  padding: 0.6rem 0.8rem;
+  cursor: pointer;
+  transition: all var(--transition-smooth);
+  text-align: left;
+}
+
+.rec-std-chip:hover {
+  background: #dcfce7;
+  transform: translateY(-2px);
+}
+
+.rec-std-chip.selected {
+  border-color: #15803d;
+  background: #dcfce7;
+  font-weight: 700;
+}
+
+.standards-subject-select {
+  padding: 0.6rem 0.9rem;
+  font-size: 0.9rem;
+  font-family: inherit;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 10px;
+  background-color: #ffffff;
+  color: var(--text-main);
+  outline: none;
+  cursor: pointer;
+}
+
+.standards-subject-select:focus {
+  border-color: #0f172a;
+}
+
+.btn-load-more {
+  display: block;
+  width: 100%;
+  padding: 0.75rem;
+  margin-top: 0.75rem;
+  background: #f8fafc;
+  border: 1.5px dashed #cbd5e1;
+  border-radius: 10px;
+  font-family: 'Jua', sans-serif;
+  font-size: 0.95rem;
+  color: #334155;
+  cursor: pointer;
+  transition: all var(--transition-smooth);
+}
+
+.btn-load-more:hover {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+  color: #0f172a;
+}
+
+/* ==========================================================================
    키보드 접근성 (:focus-visible)
    ========================================================================== */
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
+select:focus-visible,
 .choice-bubble-card:focus-visible,
 .standard-pick-item:focus-visible,
+.rec-std-chip:focus-visible,
 .pill-option-btn:focus-visible {
   outline: 3px solid #f43f5e;
   outline-offset: 2px;
@@ -971,9 +1107,11 @@ textarea:focus-visible,
   }
 
   .immersive-step-card {
+    height: auto;
+    min-height: 0;
+    max-height: none;
     padding: 1.2rem;
     border-radius: var(--radius-md);
-    max-height: none;
     overflow: visible;
   }
 
@@ -1048,4 +1186,5 @@ textarea:focus-visible,
     display: none !important;
   }
 }
+
 

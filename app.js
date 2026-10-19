@@ -5,9 +5,13 @@ import {
   EVALUATION_FOCUS_OPTIONS, 
   TEACHING_METHOD_OPTIONS,
   getStandardsForSchoolLevel,
-  getRecommendedStandards 
+  getRecommendedStandards
 } from './standards-data.js';
-import { generateAndDownloadHwpx, escapeXml } from './hwpx-generator.js';
+import { 
+  generateAndDownloadHwpx, 
+  buildPlanDocument,
+  getAcademicYear 
+} from './hwpx-generator.js';
 
 // ============================================================================
 // 안전한 HTML 이스케이프 유틸리티 (XSS 원천 차단)
@@ -27,11 +31,23 @@ export function escapeHtml(str) {
 // ============================================================================
 const SESSION_STORAGE_KEY = "fieldtrip_plan_session_state";
 
+const currentYear = new Date().getFullYear();
+const defaultAcademicYear = new Date().getMonth() >= 8 ? currentYear + 1 : currentYear;
+
 const DEFAULT_PLAN = {
+  academicYear: defaultAcademicYear,
   schoolLevel: "초등학교",
   locationId: "loc-mart",
   locationName: "대형마트 / 전통시장",
-  standards: [],
+  standards: [
+    {
+      id: "std-default-1",
+      code: "[실생활-자립]",
+      title: "지역사회 참여 및 자립 생활",
+      subject: "공통",
+      desc: "지역사회 환경을 탐색하고 실생활 자립 기능 및 안전 수칙을 익혀 실천한다."
+    }
+  ],
   customStandardInput: "",
   standardsSearchKeyword: "",
   standardsSubjectFilter: "전체",
@@ -44,22 +60,24 @@ const DEFAULT_PLAN = {
   goalSkill: "시각 단서와 AAC를 활용하여 필요한 물건을 찾고 결제 과정을 독립적으로 수행한다.",
   goalAttitude: "공공장소 에티켓과 보행 안전 수칙을 지키며 즐겁게 참여한다.",
   functionalNeeds: [
-    "휠체어 이동 지원 1명 (무단차 경사로 및 엘리베이터 동선 확보)",
-    "시각적 일과표 및 사진 단서 필요 2명",
-    "소음 민감성 대비 조용한 쉼터 동선 1명"
+    "휠체어 이동 지원 1명 (무단차 경사로 필요)",
+    "시각적 단계별 일과표 및 사진 단서 필요 2명",
+    "소음 민감성 대비 저소음 휴식 쉼터 동선 1명"
   ],
   teachingMethod: "프로젝트 학습 (PBL)",
-  uploadedFileName: "2026_현장체험학습_기안양식_표준형.hwpx",
-  uploadedFileMerged: true
+  uploadedFileName: "",
+  uploadedFileMerged: false
 };
 
-const appState = {
+export const appState = {
   step: 1, // 1 ~ 11
-  plan: structuredClone(DEFAULT_PLAN)
+  plan: structuredClone(DEFAULT_PLAN),
+  uploadedTemplateBuffer: null, // 메모리 상의 HWPX ArrayBuffer
+  standardsDisplayLimit: 20
 };
 
 // ============================================================================
-// 장소별 특화 활동 팩 (P1: 마트 외 6개 장소별 고유 교육과정 활동)
+// 장소별 특화 활동 팩
 // ============================================================================
 const LOCATION_ACTIVITY_PACKS = {
   "loc-mart": {
@@ -158,7 +176,6 @@ function getActiveActivityPack(locId, locName) {
   if (LOCATION_ACTIVITY_PACKS[locId]) {
     return LOCATION_ACTIVITY_PACKS[locId];
   }
-  // 직접 입력 장소에 대한 범용 고품질 팩
   const name = locName || "체험학습지";
   return {
     preIntro: `우리가 방문할 ${name}의 시설 환경과 방문 목적을 알아봅니다.`,
@@ -178,6 +195,114 @@ function getActiveActivityPack(locId, locName) {
 }
 
 // ============================================================================
+// 단계별 유효성 검증 함수 (P0 #7)
+// ============================================================================
+export function validateStep(currentStep, plan) {
+  switch (currentStep) {
+    case 1:
+      if (!plan.schoolLevel) return { valid: false, message: "학교급을 선택해 주세요." };
+      return { valid: true };
+    case 2:
+      if (!plan.locationName || !plan.locationName.trim()) {
+        return { valid: false, message: "체험학습 장소를 입력하거나 선택해 주세요.", targetId: "customLocationInput" };
+      }
+      return { valid: true };
+    case 3:
+      if (!plan.standards || plan.standards.length === 0) {
+        return { valid: false, message: "성취기준을 최소 1개 이상 등록해 주세요.", targetId: "customStdInputField" };
+      }
+      return { valid: true };
+    case 4:
+      if (!plan.theme || !plan.theme.trim()) {
+        return { valid: false, message: "체험학습 주제를 입력해 주세요.", targetId: "themeInput" };
+      }
+      return { valid: true };
+    case 5: {
+      const num = parseInt(plan.periodCount, 10);
+      if (isNaN(num) || num < 1 || num > 30) {
+        return { valid: false, message: "차시 수는 1차시에서 30차시 사이로 입력해 주세요.", targetId: "periodCountInput" };
+      }
+      return { valid: true };
+    }
+    case 6:
+      if (!plan.evalFocusId) return { valid: false, message: "평가 중점을 선택해 주세요." };
+      return { valid: true };
+    case 7:
+      if (!plan.goalKnowledge?.trim() || !plan.goalSkill?.trim() || !plan.goalAttitude?.trim()) {
+        return { valid: false, message: "3차원 학습 목표(지식·기능·태도)를 모두 입력해 주세요." };
+      }
+      return { valid: true };
+    default:
+      return { valid: true };
+  }
+}
+
+// ============================================================================
+// 세션 스토리지 영속화 및 검증 (P0 #8)
+// ============================================================================
+export function loadPlanFromSession() {
+  try {
+    const saved = sessionStorage.getItem(SESSION_STORAGE_KEY);
+    if (!saved) return;
+    const parsed = JSON.parse(saved);
+    if (parsed && typeof parsed === "object") {
+      if (Number.isInteger(parsed.step) && parsed.step >= 1 && parsed.step <= 11) {
+        appState.step = parsed.step;
+      }
+      if (parsed.plan && typeof parsed.plan === "object") {
+        const p = parsed.plan;
+        appState.plan = {
+          ...DEFAULT_PLAN,
+          ...p,
+          standards: Array.isArray(p.standards) 
+            ? p.standards.filter(s => s && typeof s === 'object' && s.code) 
+            : DEFAULT_PLAN.standards,
+          functionalNeeds: Array.isArray(p.functionalNeeds) 
+            ? p.functionalNeeds 
+            : DEFAULT_PLAN.functionalNeeds,
+          periodCount: Number.isInteger(p.periodCount) && p.periodCount >= 1 && p.periodCount <= 30 
+            ? p.periodCount 
+            : 10,
+          uploadedFileName: typeof p.uploadedFileName === 'string' ? p.uploadedFileName : "",
+          uploadedFileMerged: Boolean(p.uploadedFileMerged)
+        };
+      }
+    }
+  } catch (err) {
+    console.warn("세션 복원 실패, 기본값으로 초기화합니다:", err);
+    appState.step = 1;
+    appState.plan = structuredClone(DEFAULT_PLAN);
+  }
+}
+
+export function savePlanToSession() {
+  try {
+    // uploadedTemplateBuffer는 대용량 ArrayBuffer이므로 sessionStorage에 넣지 않고 메모리 유지
+    const planToSave = { ...appState.plan };
+    sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
+      step: appState.step,
+      plan: planToSave
+    }));
+  } catch (err) {
+    console.warn("세션 저장 실패:", err);
+  }
+}
+
+function ensureDefaultStandards() {
+  if (!appState.plan.standards || appState.plan.standards.length === 0) {
+    appState.plan.standards = [
+      {
+        id: "std-default-1",
+        code: "[실생활-자립]",
+        title: "지역사회 참여 및 자립 생활",
+        subject: "공통",
+        desc: "지역사회 환경을 탐색하고 실생활 자립 기능 및 안전 수칙을 익혀 실천한다."
+      }
+    ];
+  }
+}
+
+// ============================================================================
 // 애플리케이션 초기화
 // ============================================================================
 if (typeof document !== 'undefined') {
@@ -189,46 +314,10 @@ if (typeof document !== 'undefined') {
   });
 }
 
-function loadPlanFromSession() {
-  try {
-    const saved = sessionStorage.getItem(SESSION_STORAGE_KEY);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (parsed && typeof parsed.step === "number" && parsed.plan) {
-        appState.step = parsed.step;
-        appState.plan = { ...DEFAULT_PLAN, ...parsed.plan };
-      }
-    }
-  } catch (err) {
-    console.warn("세션 복원 건너뜀:", err);
-  }
-}
-
-function savePlanToSession() {
-  try {
-    sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
-      step: appState.step,
-      plan: appState.plan
-    }));
-  } catch (err) {
-    console.warn("세션 저장 실패:", err);
-  }
-}
-
-function ensureDefaultStandards() {
-  if (!appState.plan.standards || appState.plan.standards.length === 0) {
-    const recommended = getRecommendedStandards(appState.plan.schoolLevel, appState.plan.locationId);
-    if (recommended.length > 0) {
-      appState.plan.standards = [recommended[0]];
-    }
-  }
-}
-
 // ============================================================================
-// 이벤트 위임 시스템 (CSP 완전 준수: 인라인 onclick/oninput 일체 없음)
+// 이벤트 위임 시스템 (CSP 준수 & 재진입 방지)
 // ============================================================================
 function setupEventDelegation() {
-  // 1. 상단 글로벌 네비게이션 버튼
   const prevBtn = document.getElementById("prevStepBtn");
   const nextBtn = document.getElementById("nextStepBtn");
   const resetBtn = document.getElementById("resetWizardBtn");
@@ -243,6 +332,17 @@ function setupEventDelegation() {
 
   if (nextBtn) {
     nextBtn.addEventListener("click", () => {
+      // 다음 단계로 넘어가기 전 유효성 검증
+      const validation = validateStep(appState.step, appState.plan);
+      if (!validation.valid) {
+        showToast(validation.message, "error");
+        if (validation.targetId) {
+          const el = document.getElementById(validation.targetId);
+          if (el) el.focus();
+        }
+        return;
+      }
+
       if (appState.step < 11) {
         goToStep(appState.step + 1);
       } else {
@@ -257,7 +357,7 @@ function setupEventDelegation() {
     });
   }
 
-  // 2. 메인 인터랙션 박스 클릭 위임
+  // 메인 인터랙션 박스 이벤트 위임
   const interactionBox = document.getElementById("cardInteractionBox");
   if (interactionBox) {
     interactionBox.addEventListener("click", handleInteractionClick);
@@ -272,6 +372,7 @@ function handleResetConfirmation() {
   if (confirmed) {
     appState.step = 1;
     appState.plan = structuredClone(DEFAULT_PLAN);
+    appState.uploadedTemplateBuffer = null;
     ensureDefaultStandards();
     savePlanToSession();
     renderStep(1);
@@ -284,6 +385,15 @@ function goToStep(targetStep) {
   savePlanToSession();
   renderStep(appState.step);
   window.scrollTo({ top: 0, behavior: "smooth" });
+  
+  // 접근성을 위해 스텝 변경 시 질문 타이틀로 포커스 이동
+  setTimeout(() => {
+    const titleEl = document.getElementById("cardQuestionTitle");
+    if (titleEl) {
+      titleEl.setAttribute("tabindex", "-1");
+      titleEl.focus();
+    }
+  }, 100);
 }
 
 // ----------------------------------------------------------------------------
@@ -298,27 +408,47 @@ function handleInteractionClick(e) {
   const val = target.getAttribute("data-val");
 
   switch (action) {
-    // 1단계: 학교급
+    // 1단계: 학교급 선택 (P0 #5 이전 학교급 성취기준 정리)
     case "select-school-level": {
-      appState.plan.schoolLevel = val;
-      const rec = getRecommendedStandards(val, appState.plan.locationId);
-      if (rec.length > 0) {
-        appState.plan.standards = [rec[0]];
+      if (appState.plan.schoolLevel !== val) {
+        const oldLevel = appState.plan.schoolLevel;
+        appState.plan.schoolLevel = val;
+        
+        // 이전 학교급의 국가 성취기준 코드 확인
+        const oldStandards = getStandardsForSchoolLevel(oldLevel);
+        const oldCodes = new Set(oldStandards.map(s => s.code));
+        const prevCount = appState.plan.standards.length;
+        
+        // 직접 입력 성취기준([직접-...] 또는 실생활)은 보존하고 구 교육과정만 정리
+        appState.plan.standards = appState.plan.standards.filter(s => {
+          if (s.code.startsWith("[직접") || s.code === "[실생활-자립]") return true;
+          return !oldCodes.has(s.code);
+        });
+
+        if (appState.plan.standards.length === 0) {
+          ensureDefaultStandards();
+        }
+
+        appState.plan.standardsSearchKeyword = "";
+        appState.plan.standardsSubjectFilter = "전체";
+        appState.standardsDisplayLimit = 20;
+
+        savePlanToSession();
+        renderStep(1);
+
+        const removedCount = prevCount - appState.plan.standards.length;
+        showToast(
+          `'${val}' 교육과정으로 설정되었습니다.${removedCount > 0 ? ` (이전 학교급 기준 ${removedCount}건 정리)` : ''}`, 
+          "info"
+        );
       }
-      savePlanToSession();
-      renderStep(1);
-      showToast(`'${val}' 교육과정이 설정되었습니다.`, "info");
       break;
     }
 
-    // 2단계: 장소
+    // 2단계: 장소 선택
     case "select-location": {
       appState.plan.locationId = id;
       appState.plan.locationName = val;
-      const rec = getRecommendedStandards(appState.plan.schoolLevel, id);
-      if (rec.length > 0) {
-        appState.plan.standards = [rec[0]];
-      }
       const themes = THEME_SUGGESTIONS[id];
       if (themes && themes.length > 0) {
         appState.plan.theme = themes[0];
@@ -329,17 +459,14 @@ function handleInteractionClick(e) {
       break;
     }
 
-    // 3단계: 성취기준 토글
+    // 3단계: 성취기준 토글 (P0 #3 UID 및 ID 기반 토글)
     case "toggle-standard": {
       const code = id;
       const all = getStandardsForSchoolLevel(appState.plan.schoolLevel);
       const idx = appState.plan.standards.findIndex(s => s.code === code);
       if (idx >= 0) {
-        if (appState.plan.standards.length === 1) {
-          showToast("최소 1개 이상의 성취기준이 필요합니다.", "info");
-          return;
-        }
         appState.plan.standards.splice(idx, 1);
+        showToast("성취기준 선택이 해제되었습니다.", "info");
       } else {
         const found = all.find(s => s.code === code) || {
           code,
@@ -347,14 +474,18 @@ function handleInteractionClick(e) {
           subject: "공통",
           desc: code
         };
-        appState.plan.standards.push(found);
+        appState.plan.standards.push({
+          ...found,
+          id: `std-pick-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+        });
+        showToast("성취기준이 추가되었습니다.", "success");
       }
       savePlanToSession();
       renderStep(3);
       break;
     }
 
-    // 3단계: 직접 입력 성취기준 추가
+    // 3단계: 직접 입력 성취기준 추가 (P0 #3, #4 멀티라인 파싱 & 고유 번호 충돌 방지)
     case "add-custom-standard": {
       const input = document.getElementById("customStdInputField");
       const textVal = (input ? input.value : appState.plan.customStandardInput).trim();
@@ -362,41 +493,74 @@ function handleInteractionClick(e) {
         showToast("성취기준 내용을 입력해 주세요.", "info");
         return;
       }
-      const match = textVal.match(/^\[([^\]]+)\](.*)$/);
-      const code = match ? `[${match[1].trim()}]` : `[직접-${appState.plan.standards.length + 1}]`;
-      const desc = match ? match[2].trim() : textVal;
 
-      appState.plan.standards.push({
-        code,
-        title: "사용자 직접 입력",
-        subject: "공통",
-        desc: desc || textVal
-      });
-      appState.plan.customStandardInput = "";
-      savePlanToSession();
-      renderStep(3);
-      showToast("새 성취기준이 추가되었습니다.", "success");
-      break;
-    }
+      const lines = textVal.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+      let addedCount = 0;
 
-    // 3단계: 성취기준 삭제
-    case "remove-standard": {
-      const code = id;
-      if (appState.plan.standards.length === 1) {
-        showToast("최소 1개 이상의 성취기준이 필요합니다.", "info");
-        return;
+      // 기존 [직접-N]의 최대 번호 확인
+      let maxDirectNum = 0;
+      for (const s of appState.plan.standards) {
+        const m = s.code.match(/^\[직접-(\d+)\]$/);
+        if (m) {
+          const n = parseInt(m[1], 10);
+          if (n > maxDirectNum) maxDirectNum = n;
+        }
       }
-      appState.plan.standards = appState.plan.standards.filter(s => s.code !== code);
+
+      for (const line of lines) {
+        const match = line.match(/^\[([^\]]+)\]\s*(.*)$/);
+        let code;
+        let desc;
+        if (match) {
+          code = `[${match[1].trim()}]`;
+          desc = match[2].trim() || code;
+        } else {
+          maxDirectNum++;
+          code = `[직접-${maxDirectNum}]`;
+          desc = line;
+        }
+
+        const uniqueId = `std-custom-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        appState.plan.standards.push({
+          id: uniqueId,
+          code,
+          title: "직접 입력 성취기준",
+          subject: "직접입력",
+          desc
+        });
+        addedCount++;
+      }
+
+      appState.plan.customStandardInput = "";
+      if (input) input.value = "";
       savePlanToSession();
       renderStep(3);
-      showToast("성취기준이 제거되었습니다.", "info");
+      showToast(`${addedCount}건의 성취기준이 등록되었습니다.`, "success");
       break;
     }
 
-    // 3단계: 교과목 필터 칩
+    // 3단계: 성취기준 개별 삭제 (P0 #3 UID 또는 Code 매칭)
+    case "remove-standard": {
+      const targetId = id;
+      appState.plan.standards = appState.plan.standards.filter(s => (s.id ? s.id !== targetId : s.code !== targetId));
+      savePlanToSession();
+      renderStep(3);
+      showToast("성취기준이 삭제되었습니다.", "info");
+      break;
+    }
+
+    // 3단계: 교과목 필터 칩 (P0 #6)
     case "filter-standards-subject": {
       appState.plan.standardsSubjectFilter = val;
+      appState.standardsDisplayLimit = 20;
       renderStep(3);
+      break;
+    }
+
+    // 3단계: 검색 결과 더 보기 (P0 #6)
+    case "load-more-standards": {
+      appState.standardsDisplayLimit += 20;
+      updateCurriculumStandardsList();
       break;
     }
 
@@ -459,7 +623,7 @@ function handleInteractionClick(e) {
       break;
     }
 
-    // 8단계: 기능적 지원 태그 추가
+    // 8단계: 기능적 지원 태그 추가 (P1 #14)
     case "add-functional-tag": {
       if (!appState.plan.functionalNeeds.includes(val)) {
         appState.plan.functionalNeeds.push(val);
@@ -479,7 +643,7 @@ function handleInteractionClick(e) {
       break;
     }
 
-    // 10단계 / 11단계: 다운로드 및 복사
+    // 10단계 / 11단계: 다운로드, 복사, 인쇄
     case "download-hwpx": {
       triggerHwpxDownload();
       break;
@@ -496,9 +660,13 @@ function handleInteractionClick(e) {
       handleResetConfirmation();
       break;
     }
+
+    // 11단계: 파일 업로드 트리거 (P0 #2 버블링 재진입 방지)
     case "trigger-file-upload": {
       const fileInput = document.getElementById("schoolTemplateFileInput");
-      if (fileInput) fileInput.click();
+      if (fileInput) {
+        fileInput.click();
+      }
       break;
     }
     default:
@@ -507,7 +675,7 @@ function handleInteractionClick(e) {
 }
 
 // ----------------------------------------------------------------------------
-// 입력/변경 이벤트 디스패처 (실시간 데이터 동기화)
+// 입력 이벤트 디스패처 (실시간 데이터 동기화)
 // ----------------------------------------------------------------------------
 function handleInteractionInput(e) {
   const model = e.target.getAttribute("data-model");
@@ -515,10 +683,36 @@ function handleInteractionInput(e) {
 
   const val = e.target.value;
   switch (model) {
-    case "locationName":
-      appState.plan.locationName = val;
-      savePlanToSession();
+    case "academicYear": {
+      const parsed = parseInt(val, 10);
+      if (!isNaN(parsed) && parsed > 2000) {
+        appState.plan.academicYear = parsed;
+        savePlanToSession();
+      }
       break;
+    }
+    case "locationName": {
+      appState.plan.locationName = val;
+      const matched = LOCATION_PRESETS.find(p => p.name.trim() === val.trim());
+      if (matched) {
+        appState.plan.locationId = matched.id;
+      } else {
+        appState.plan.locationId = "loc-custom";
+      }
+      savePlanToSession();
+      const cards = document.querySelectorAll(".choice-bubble-card[data-action='select-location']");
+      cards.forEach(card => {
+        const cardId = card.getAttribute("data-id");
+        if (appState.plan.locationId === cardId) {
+          card.classList.add("selected");
+          card.setAttribute("aria-pressed", "true");
+        } else {
+          card.classList.remove("selected");
+          card.setAttribute("aria-pressed", "false");
+        }
+      });
+      break;
+    }
     case "theme":
       appState.plan.theme = val;
       savePlanToSession();
@@ -528,7 +722,8 @@ function handleInteractionInput(e) {
       break;
     case "standardsSearchKeyword":
       appState.plan.standardsSearchKeyword = val;
-      renderStep(3);
+      appState.standardsDisplayLimit = 20;
+      updateCurriculumStandardsList();
       break;
     case "periodCount": {
       const num = parseInt(val, 10);
@@ -560,22 +755,58 @@ function handleInteractionInput(e) {
   }
 }
 
+// ----------------------------------------------------------------------------
+// 변경 이벤트 디스패처 (파일 업로드 & 셀렉트 박스)
+// ----------------------------------------------------------------------------
 function handleInteractionChange(e) {
+  // 과목 셀렉트 박스 변경 (P0 #6)
+  if (e.target.id === "standardsSubjectSelect") {
+    appState.plan.standardsSubjectFilter = e.target.value;
+    appState.standardsDisplayLimit = 20;
+    renderStep(3);
+    return;
+  }
+
+  // 11단계 학교 서식 파일 업로드 (P0 #1, #2)
   if (e.target.id === "schoolTemplateFileInput") {
     const file = e.target.files && e.target.files[0];
     if (file) {
-      appState.plan.uploadedFileName = file.name;
-      appState.plan.uploadedFileMerged = true;
-      savePlanToSession();
-      renderStep(11);
-      showToast(`'${file.name}' 서식이 등록되었습니다. 한글 기안 시 제목과 양식에 완벽 반영됩니다.`, "success");
+      if (!file.name.toLowerCase().endsWith(".hwpx")) {
+        showToast("학교 양식은 .hwpx 형식의 파일만 지원됩니다.", "error");
+        e.target.value = "";
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        appState.uploadedTemplateBuffer = ev.target.result;
+        appState.plan.uploadedFileName = file.name;
+        appState.plan.uploadedFileMerged = true;
+        savePlanToSession();
+        renderStep(11);
+        showToast(`'${file.name}' 서식이 등록되었습니다. 한글 기안 시 해당 서식에 실제 합성됩니다.`, "success");
+      };
+      reader.onerror = () => {
+        showToast("파일을 읽는 중 오류가 발생했습니다.", "error");
+      };
+      reader.readAsArrayBuffer(file);
     }
   }
 }
 
 function handleInteractionKeydown(e) {
+  // 성취기준 textarea에서 Enter 단독 입력 시 등록, Shift+Enter는 줄바꿈 (P0 #4)
+  if (e.target.id === "customStdInputField") {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      const addBtn = document.querySelector("[data-action='add-custom-standard']");
+      if (addBtn) addBtn.click();
+      return;
+    }
+  }
+
   if (e.key === "Enter" || e.key === " ") {
-    const card = e.target.closest(".choice-bubble-card, .standard-pick-item, .pill-option-btn");
+    const card = e.target.closest(".choice-bubble-card, .standard-pick-item, .rec-std-chip, .pill-option-btn, .template-upload-zone");
     if (card && card.hasAttribute("data-action")) {
       e.preventDefault();
       card.click();
@@ -589,8 +820,11 @@ function handleInteractionKeydown(e) {
 function renderStep(step) {
   const stepText = document.getElementById("stepCounterText");
   const stepFill = document.getElementById("stepProgressFill");
+  const stepTrack = document.getElementById("stepProgressTrack");
+  
   if (stepText) stepText.textContent = `STEP ${String(step).padStart(2, '0')} / 11`;
   if (stepFill) stepFill.style.width = `${(step / 11) * 100}%`;
+  if (stepTrack) stepTrack.setAttribute("aria-valuenow", String(step));
 
   const prevBtn = document.getElementById("prevStepBtn");
   const nextBtn = document.getElementById("nextStepBtn");
@@ -634,13 +868,13 @@ function renderStep(step) {
 function renderStep1(pill, title, subtitle, box) {
   pill.textContent = "1단계: 학교급 선택";
   title.textContent = "어느 학교급의 체험학습을 설계하시나요?";
-  subtitle.textContent = "선택하신 학교급에 맞추어 국가 교육과정 성취기준을 연결하고 맞춤형 추천을 제공합니다.";
+  subtitle.textContent = "선택하신 학교급에 맞추어 국가 교육과정 성취기준 및 활동 양식을 연결합니다.";
 
   box.innerHTML = `
     <div class="choice-grid-cards">
       ${SCHOOL_LEVEL_OPTIONS.map(opt => `
         <div class="choice-bubble-card ${appState.plan.schoolLevel === opt.name ? 'selected' : ''}" 
-             role="button" tabindex="0"
+             role="button" tabindex="0" aria-pressed="${appState.plan.schoolLevel === opt.name}"
              data-action="select-school-level" data-val="${escapeHtml(opt.name)}">
           <div class="choice-card-top">
             <span class="choice-card-badge">${escapeHtml(opt.badge)}</span>
@@ -659,106 +893,212 @@ function renderStep1(pill, title, subtitle, box) {
 function renderStep2(pill, title, subtitle, box) {
   pill.textContent = "2단계: 체험학습 장소";
   title.textContent = "이번 체험학습은 어디로 떠나나요?";
-  subtitle.textContent = "학생들과 함께 배움을 경험할 지역사회 공간을 선택하거나 직접 입력해 주세요.";
+  subtitle.textContent = "학생들과 함께 배움을 경험할 체험학습 장소를 입력하거나 추천 항목에서 선택해 주세요.";
 
   box.innerHTML = `
-    <div class="choice-grid-cards">
-      ${LOCATION_PRESETS.map(loc => `
-        <div class="choice-bubble-card ${appState.plan.locationId === loc.id ? 'selected' : ''}" 
-             role="button" tabindex="0"
-             data-action="select-location" data-id="${escapeHtml(loc.id)}" data-val="${escapeHtml(loc.name)}">
-          <div class="choice-card-top">
-            <span class="choice-card-badge">${escapeHtml(loc.icon)}</span>
-          </div>
-          <h2 class="choice-card-title">${escapeHtml(loc.name)}</h2>
-          <p class="choice-card-desc">${escapeHtml(loc.desc)}</p>
-        </div>
-      `).join("")}
-    </div>
-    <div class="soft-input-group">
-      <label for="customLocationInput" style="font-size: 0.92rem; font-weight: 700; color: var(--text-muted);">장소 직접 입력하기:</label>
+    <!-- 장소 직접 입력 -->
+    <div class="input-card-box" style="margin-bottom: 1.6rem;">
+      <label for="customLocationInput" style="font-size: 1.05rem; font-weight: 800; color: #0f172a; margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.5rem;">
+        <span class="label-badge">입력</span>
+        체험학습 장소명
+      </label>
       <input type="text" class="soft-text-input" id="customLocationInput" 
              placeholder="예: 서울숲 곤충식물원, 뚜레쥬르 베이커리 등 직접 입력" 
              value="${escapeHtml(appState.plan.locationName)}" 
-             data-model="locationName">
+             data-model="locationName"
+             style="font-size: 1.1rem; padding: 0.95rem 1.2rem;">
+      <p style="font-size: 0.82rem; color: #64748b; margin-top: 0.4rem; margin-bottom: 0;">
+        * 장소명을 직접 입력하시거나 아래 추천 항목 중 원하는 장소를 클릭하여 선택하세요.
+      </p>
+    </div>
+
+    <!-- 추천 항목 -->
+    <div>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.8rem;">
+        <span style="font-family: 'Jua', sans-serif; font-size: 1.1rem; color: var(--text-main);">
+          자주 찾는 추천 장소 (클릭 시 자동 반영)
+        </span>
+        <span style="font-size: 0.8rem; color: #64748b;">
+          6가지 주요 테마 공간
+        </span>
+      </div>
+      <div class="choice-grid-cards">
+        ${LOCATION_PRESETS.map(loc => `
+          <div class="choice-bubble-card ${appState.plan.locationId === loc.id ? 'selected' : ''}" 
+               role="button" tabindex="0" aria-pressed="${appState.plan.locationId === loc.id}"
+               data-action="select-location" data-id="${escapeHtml(loc.id)}" data-val="${escapeHtml(loc.name)}">
+            <div class="choice-card-top">
+              <span class="choice-card-badge">${escapeHtml(loc.icon)}</span>
+            </div>
+            <h2 class="choice-card-title">${escapeHtml(loc.name)}</h2>
+            <p class="choice-card-desc">${escapeHtml(loc.desc)}</p>
+          </div>
+        `).join("")}
+      </div>
     </div>
   `;
 }
 
 // ----------------------------------------------------------------------------
-// 3단계: 성취기준 설정 (실시간 검색 + 과목 필터 + 직접 추가)
+// 3단계: 성취기준 설정 (P0 #3, #4, #6, P1 #13)
 // ----------------------------------------------------------------------------
 function renderStep3(pill, title, subtitle, box) {
   pill.textContent = "3단계: 성취기준 설정";
-  title.textContent = "어떤 교육과정 성취기준을 연결할까요?";
-  subtitle.textContent = `${appState.plan.schoolLevel} 교육과정 기반 성취기준을 검색하여 선택하거나 직접 입력해 주세요.`;
+  title.textContent = "체험학습에 반영할 성취기준을 넣어주세요";
+  subtitle.textContent = "장소 맞춤 추천 성취기준을 확인하거나, 직접 입력 및 국가 교육과정 검색으로 등록할 수 있습니다.";
 
   const allStandards = getStandardsForSchoolLevel(appState.plan.schoolLevel);
   const selectedCodes = appState.plan.standards.map(s => s.code);
   const keyword = (appState.plan.standardsSearchKeyword || "").trim().toLowerCase();
   const subjectFilter = appState.plan.standardsSubjectFilter || "전체";
 
-  // 사용 가능한 과목군 추출
-  const subjects = ["전체", ...new Set(allStandards.map(s => s.subject))].slice(0, 8);
+  // 장소 특화 추천 성취기준 (P1 #13)
+  const recommendedStandards = getRecommendedStandards(appState.plan.schoolLevel, appState.plan.locationId);
 
-  let filteredList = [];
-  if (keyword) {
-    filteredList = allStandards.filter(s => {
-      const matchSubject = subjectFilter === "전체" || s.subject === subjectFilter;
-      const matchKeyword = s.code.toLowerCase().includes(keyword) ||
-                           s.title.toLowerCase().includes(keyword) ||
-                           s.desc.toLowerCase().includes(keyword) ||
-                           s.subject.toLowerCase().includes(keyword);
-      return matchSubject && matchKeyword;
-    }).slice(0, 15);
-  } else {
-    const recommended = getRecommendedStandards(appState.plan.schoolLevel, appState.plan.locationId);
-    filteredList = recommended.filter(s => subjectFilter === "전체" || s.subject === subjectFilter);
-  }
+  // 모든 고유 과목명 추출 (가나다 정렬, P0 #6 전체 51과목 완벽 지원)
+  const rawSubjects = [...new Set(allStandards.map(s => s.subject))].sort();
+  const allSubjects = ["전체", ...rawSubjects];
+
+  // 필터링 적용
+  const filteredList = allStandards.filter(s => {
+    const matchSubject = subjectFilter === "전체" || s.subject === subjectFilter;
+    if (!matchSubject) return false;
+    if (!keyword) return true;
+    return s.code.toLowerCase().includes(keyword) ||
+           s.title.toLowerCase().includes(keyword) ||
+           s.desc.toLowerCase().includes(keyword) ||
+           s.subject.toLowerCase().includes(keyword);
+  });
+
+  const displayList = filteredList.slice(0, appState.standardsDisplayLimit);
 
   box.innerHTML = `
     <div class="standards-picker-container">
-      <!-- 1) 현재 선택된 성취기준 칩 목록 -->
-      <div style="background: #ffffff; border: 1.5px solid #e2e8f0; padding: 1rem; border-radius: 16px; margin-bottom: 0.8rem;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-          <span style="font-weight: 800; font-size: 0.95rem; color: #0f172a;">
-            현재 선택된 성취기준 (${appState.plan.standards.length}개):
-          </span>
-          <span style="font-size: 0.78rem; color: #64748b;">(최소 1개 이상 유지)</span>
-        </div>
-        <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
-          ${appState.plan.standards.map(s => `
-            <span style="background: #fff1f2; border: 1px solid #fecdd3; color: #e11d48; padding: 0.35rem 0.75rem; border-radius: 9999px; font-size: 0.84rem; display: inline-flex; align-items: center; gap: 0.4rem;">
-              <strong>${escapeHtml(s.code)}</strong> ${escapeHtml(s.title || s.subject)}
-              <button type="button" style="border: none; background: transparent; cursor: pointer; color: #e11d48; font-weight: 900; margin-left: 2px;" 
-                      data-action="remove-standard" data-id="${escapeHtml(s.code)}" title="삭제">×</button>
+      <!-- 1) 장소 맞춤 추천 성취기준 쉘프 (P1 #13) -->
+      ${recommendedStandards.length > 0 ? `
+        <div class="recommended-standards-shelf">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-family: 'Jua', sans-serif; font-size: 1rem; color: #15803d; display: flex; align-items: center; gap: 0.4rem;">
+              <span>💡</span> [${escapeHtml(appState.plan.locationName)}] 연계 추천 성취기준 (클릭하여 추가):
             </span>
-          `).join("")}
+            <span style="font-size: 0.78rem; color: #166534;">핵심 성취기준 6~8선</span>
+          </div>
+          <div class="recommended-standards-grid">
+            ${recommendedStandards.map(r => {
+              const isSel = selectedCodes.includes(r.code);
+              return `
+                <div class="rec-std-chip ${isSel ? 'selected' : ''}" 
+                     role="button" tabindex="0" aria-pressed="${isSel}"
+                     data-action="toggle-standard" data-id="${escapeHtml(r.code)}">
+                  <div style="font-size: 0.8rem; font-weight: 800; color: #15803d;">${escapeHtml(r.code)} (${escapeHtml(r.subject)})</div>
+                  <div style="font-size: 0.85rem; color: #1e293b; margin-top: 0.2rem; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">
+                    ${escapeHtml(r.desc)}
+                  </div>
+                  <div style="text-align: right; margin-top: 0.3rem;">
+                    <span style="font-size: 0.75rem; color: ${isSel ? '#15803d' : '#64748b'}; font-weight: 700;">
+                      ${isSel ? '선택됨 ✓' : '+ 추가'}
+                    </span>
+                  </div>
+                </div>
+              `;
+            }).join("")}
+          </div>
         </div>
-      </div>
+      ` : ''}
 
-      <!-- 2) 성취기준 검색 및 직접 입력창 -->
-      <div class="soft-input-group" style="margin-top: 0; background: #fff8f8; padding: 1rem; border-radius: 16px; border: 1.5px dashed #fecdd3;">
-        <label for="standardsSearchField" style="font-size: 0.92rem; font-weight: 800; color: #e11d48;">
-          성취기준 실시간 검색 또는 직접 입력:
+      <!-- 2) 성취기준 직접 입력 / 멀티라인 붙여넣기 (P0 #4) -->
+      <div class="input-card-box">
+        <label for="customStdInputField" style="font-size: 1rem; font-weight: 800; color: #0f172a; display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.6rem;">
+          <span style="display: flex; align-items: center; gap: 0.5rem;">
+            <span class="label-badge">직접 입력</span>
+            성취기준 넣기
+          </span>
+          <span style="font-size: 0.8rem; color: #64748b; font-weight: 500;">
+            Enter 단독: 등록 / Shift+Enter: 줄바꿈
+          </span>
         </label>
-        <div style="display: flex; gap: 0.5rem; margin-top: 0.4rem; flex-wrap: wrap;">
-          <input type="text" class="soft-text-input" id="standardsSearchField" style="flex: 2; min-width: 200px;"
-                 placeholder="검색어 입력 (예: 구매, 화폐, 인사, 안전, [2국01-01])" 
-                 value="${escapeHtml(appState.plan.standardsSearchKeyword)}" 
-                 data-model="standardsSearchKeyword">
-          <input type="text" class="soft-text-input" id="customStdInputField" style="flex: 2; min-width: 200px;"
-                 placeholder="직접 추가 (예: [2국01-01] 알맞은 인사말 주고받기)" 
-                 value="${escapeHtml(appState.plan.customStandardInput)}" 
-                 data-model="customStandardInput">
-          <button type="button" class="btn-bubble-tool" style="padding: 0 1.2rem; white-space: nowrap;" data-action="add-custom-standard">
-            직접 추가
+        <div style="display: flex; gap: 0.6rem; align-items: stretch; flex-wrap: wrap;">
+          <textarea class="soft-text-input" id="customStdInputField" style="flex: 1; min-width: 250px; min-height: 52px; resize: vertical;"
+                    placeholder="예: [2국01-01] 알맞은 인사말을 주고받는다&#10;여러 줄을 동시에 복사하여 붙여넣을 수도 있습니다." 
+                    data-model="customStandardInput">${escapeHtml(appState.plan.customStandardInput)}</textarea>
+          <button type="button" class="btn-soft-primary" style="padding: 0.85rem 1.4rem; white-space: nowrap; font-size: 0.95rem; border-radius: 12px; align-self: flex-start;" data-action="add-custom-standard">
+            성취기준 등록 (+)
           </button>
         </div>
+        <p style="font-size: 0.82rem; color: #64748b; margin-top: 0.5rem; margin-bottom: 0;">
+          * 코드가 없는 문장은 [직접-1], [직접-2] 형식으로 번호가 순차 부여되며, 중복 코드 충돌 없이 안전하게 관리됩니다.
+        </p>
+      </div>
 
-        <!-- 교과목 필터 칩 -->
-        <div style="display: flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.6rem;">
-          ${subjects.map(subj => `
+      <!-- 3) 현재 등록된 성취기준 목록 -->
+      <div class="std-current-box">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem;">
+          <span style="font-weight: 800; font-size: 0.98rem; color: #0f172a; display: flex; align-items: center; gap: 0.4rem;">
+            <span style="display: inline-block; width: 8px; height: 8px; background: #10b981; border-radius: 50%;"></span>
+            현재 등록된 성취기준 (${appState.plan.standards.length}개):
+          </span>
+          <span style="font-size: 0.78rem; color: #64748b;">(최소 1개 이상 등록 필요)</span>
+        </div>
+        
+        ${appState.plan.standards.length === 0 ? `
+          <div class="empty-state-box">
+            등록된 성취기준이 없습니다. 상단에서 성취기준을 입력하거나 아래 추천/교육과정 목록에서 추가해 주세요.
+          </div>
+        ` : `
+          <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+            ${appState.plan.standards.map((s) => `
+              <div class="std-current-item">
+                <div style="display: flex; align-items: baseline; gap: 0.6rem; flex: 1; flex-wrap: wrap;">
+                  <span class="std-code-badge">${escapeHtml(s.code)}</span>
+                  <span style="font-weight: 700; font-size: 0.92rem; color: #0f172a;">${escapeHtml(s.title || s.subject || '성취기준')}</span>
+                  <span style="font-size: 0.88rem; color: #475569; word-break: keep-all;">${escapeHtml(s.desc)}</span>
+                </div>
+                <button type="button" class="btn-bubble-tool" style="padding: 0.3rem 0.7rem; font-size: 0.8rem; color: #e11d48; border-color: #fecdd3; background: #fff1f2;" 
+                        data-action="remove-standard" data-id="${escapeHtml(s.id || s.code)}" title="성취기준 삭제">삭제 ×</button>
+              </div>
+            `).join("")}
+          </div>
+        `}
+      </div>
+
+      <!-- 4) 국가 교육과정 성취기준 검색 및 전체 과목 선택 (P0 #6) -->
+      <div style="background: #ffffff; border: 1.5px solid #e2e8f0; padding: 1.2rem; border-radius: 16px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem; flex-wrap: wrap; gap: 0.4rem;">
+          <div>
+            <span style="font-family: 'Jua', sans-serif; font-size: 1.05rem; color: var(--text-main);">
+              국가 교육과정 성취기준 목록에서 찾기
+            </span>
+            <span style="font-size: 0.8rem; color: #64748b; margin-left: 0.5rem;">
+              ${escapeHtml(appState.plan.schoolLevel)} 교육과정 (${allStandards.length}개 기준)
+            </span>
+          </div>
+          <span id="standardsCurriculumCount" style="font-size: 0.82rem; color: #64748b; font-weight: 600;">
+            전체 ${filteredList.length}건 중 ${displayList.length}건 표시
+          </span>
+        </div>
+
+        <!-- 검색창 및 전체 과목 드롭다운 (51개 전 과목 접근 가능) -->
+        <div style="display: flex; gap: 0.6rem; margin-bottom: 0.8rem; flex-wrap: wrap; align-items: center;">
+          <input type="text" class="soft-text-input" id="standardsSearchField" style="flex: 1; min-width: 220px; padding: 0.75rem 1rem; font-size: 0.95rem;"
+                 placeholder="성취기준 코드 또는 검색어 입력 (예: 구매, 인사, 안전, 화폐 등)" 
+                 value="${escapeHtml(appState.plan.standardsSearchKeyword)}" 
+                 data-model="standardsSearchKeyword">
+          
+          <div style="display: flex; align-items: center; gap: 0.4rem;">
+            <label for="standardsSubjectSelect" style="font-size: 0.85rem; font-weight: 700; color: #475569; white-space: nowrap;">과목 필터:</label>
+            <select id="standardsSubjectSelect" class="standards-subject-select">
+              ${allSubjects.map(subj => `
+                <option value="${escapeHtml(subj)}" ${subjectFilter === subj ? 'selected' : ''}>
+                  ${escapeHtml(subj)}
+                </option>
+              `).join("")}
+            </select>
+          </div>
+        </div>
+
+        <!-- 주요 과목 빠른 필터 칩 (처음 8개) -->
+        <div style="display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.9rem;">
+          ${allSubjects.slice(0, 8).map(subj => `
             <button type="button" class="pill-option-btn ${subjectFilter === subj ? 'selected' : ''}" 
                     style="padding: 0.25rem 0.75rem; font-size: 0.8rem;"
                     data-action="filter-standards-subject" data-val="${escapeHtml(subj)}">
@@ -766,29 +1106,18 @@ function renderStep3(pill, title, subtitle, box) {
             </button>
           `).join("")}
         </div>
-      </div>
 
-      <!-- 3) 추천 / 검색 결과 목록 -->
-      <div style="margin-top: 0.8rem;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-          <span style="font-family: 'Jua', sans-serif; font-size: 1.05rem; color: var(--text-main);">
-            ${keyword ? `'${escapeHtml(keyword)}' 검색 결과 (${filteredList.length}건):` : `'${escapeHtml(appState.plan.locationName)}' 추천 성취기준:`}
-          </span>
-          <span style="font-size: 0.78rem; color: #64748b;">
-            클릭하여 추가하거나 선택 해제하세요
-          </span>
-        </div>
-
-        <div class="standards-bubble-list">
-          ${filteredList.length === 0 ? `
-            <div style="text-align: center; padding: 2rem; color: #94a3b8; font-size: 0.95rem;">
-              일치하는 성취기준이 없습니다. 직접 추가 기능을 이용해 등록할 수 있습니다.
+        <!-- 성취기준 카드 리스트 -->
+        <div class="standards-bubble-list" id="standardsCurriculumList">
+          ${displayList.length === 0 ? `
+            <div class="empty-state-box">
+              일치하는 성취기준이 없습니다. 상단 '성취기준 넣기'를 통해 직접 등록하실 수 있습니다.
             </div>
-          ` : filteredList.map(std => {
+          ` : displayList.map(std => {
             const isSelected = selectedCodes.includes(std.code);
             return `
               <div class="standard-pick-item ${isSelected ? 'selected' : ''}" 
-                   role="button" tabindex="0"
+                   role="button" tabindex="0" aria-pressed="${isSelected}"
                    data-action="toggle-standard" data-id="${escapeHtml(std.code)}">
                 <div style="display: flex; flex-direction: column; gap: 0.35rem; flex: 1; text-align: left;">
                   <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
@@ -799,17 +1128,101 @@ function renderStep3(pill, title, subtitle, box) {
                   <div style="font-size: 0.92rem; color: #334155; line-height: 1.55; word-break: keep-all;">${escapeHtml(std.desc)}</div>
                 </div>
                 <div style="margin-left: 0.8rem;">
-                  <span style="font-family: 'Jua', sans-serif; font-size: 0.92rem; color: ${isSelected ? '#0f172a' : '#94a3b8'}; padding: 0.3rem 0.75rem; border-radius: 9999px; background: ${isSelected ? '#e2e8f0' : 'transparent'};">
-                    ${isSelected ? '선택됨' : '선택'}
+                  <span style="font-family: 'Jua', sans-serif; font-size: 0.92rem; color: ${isSelected ? '#0f172a' : '#64748b'}; padding: 0.35rem 0.85rem; border-radius: 9999px; background: ${isSelected ? '#e2e8f0' : '#f8fafc'}; border: 1px solid ${isSelected ? '#cbd5e1' : '#e2e8f0'};">
+                    ${isSelected ? '선택됨 ✓' : '+ 추가'}
                   </span>
                 </div>
               </div>
             `;
           }).join("")}
         </div>
+
+        <!-- 더 보기 버튼 (P0 #6) -->
+        ${filteredList.length > displayList.length ? `
+          <button type="button" class="btn-load-more" data-action="load-more-standards">
+            성취기준 더 보기 (+20건) — 남은 기준: ${filteredList.length - displayList.length}건
+          </button>
+        ` : ''}
       </div>
     </div>
   `;
+}
+
+// ----------------------------------------------------------------------------
+// 교육과정 성취기준 실시간 필터링 업데이트 (P0 #6)
+// ----------------------------------------------------------------------------
+function updateCurriculumStandardsList() {
+  const container = document.getElementById("standardsCurriculumList");
+  const countLabel = document.getElementById("standardsCurriculumCount");
+  if (!container) return;
+
+  const allStandards = getStandardsForSchoolLevel(appState.plan.schoolLevel);
+  const selectedCodes = appState.plan.standards.map(s => s.code);
+  const keyword = (appState.plan.standardsSearchKeyword || "").trim().toLowerCase();
+  const subjectFilter = appState.plan.standardsSubjectFilter || "전체";
+
+  const filtered = allStandards.filter(s => {
+    const matchSubject = subjectFilter === "전체" || s.subject === subjectFilter;
+    if (!matchSubject) return false;
+    if (!keyword) return true;
+    return s.code.toLowerCase().includes(keyword) ||
+           s.title.toLowerCase().includes(keyword) ||
+           s.desc.toLowerCase().includes(keyword) ||
+           s.subject.toLowerCase().includes(keyword);
+  });
+
+  const displayList = filtered.slice(0, appState.standardsDisplayLimit);
+
+  if (countLabel) {
+    countLabel.textContent = `전체 ${filtered.length}건 중 ${displayList.length}건 표시`;
+  }
+
+  if (displayList.length === 0) {
+    container.innerHTML = `
+      <div class="empty-state-box">
+        일치하는 성취기준이 없습니다. 상단 '성취기준 넣기'를 통해 직접 등록하실 수 있습니다.
+      </div>
+    `;
+    return;
+  }
+
+  container.innerHTML = displayList.map(std => {
+    const isSelected = selectedCodes.includes(std.code);
+    return `
+      <div class="standard-pick-item ${isSelected ? 'selected' : ''}" 
+           role="button" tabindex="0" aria-pressed="${isSelected}"
+           data-action="toggle-standard" data-id="${escapeHtml(std.code)}">
+        <div style="display: flex; flex-direction: column; gap: 0.35rem; flex: 1; text-align: left;">
+          <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+            <span class="std-code-badge">${escapeHtml(std.code)}</span>
+            <span style="font-size: 0.78rem; background: #f1f5f9; color: #0f172a; padding: 0.15rem 0.6rem; border-radius: 9999px; font-weight: 700; border: 1px solid #e2e8f0;">${escapeHtml(std.subject)}</span>
+            <span style="font-weight: 800; font-size: 0.96rem; color: #0f172a;">${escapeHtml(std.title)}</span>
+          </div>
+          <div style="font-size: 0.92rem; color: #334155; line-height: 1.55; word-break: keep-all;">${escapeHtml(std.desc)}</div>
+        </div>
+        <div style="margin-left: 0.8rem;">
+          <span style="font-family: 'Jua', sans-serif; font-size: 0.92rem; color: ${isSelected ? '#0f172a' : '#64748b'}; padding: 0.35rem 0.85rem; border-radius: 9999px; background: ${isSelected ? '#e2e8f0' : '#f8fafc'}; border: 1px solid ${isSelected ? '#cbd5e1' : '#e2e8f0'};">
+            ${isSelected ? '선택됨 ✓' : '+ 추가'}
+          </span>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  // 더 보기 버튼 갱신
+  let moreBtn = container.parentElement.querySelector(".btn-load-more");
+  if (filtered.length > displayList.length) {
+    if (!moreBtn) {
+      moreBtn = document.createElement("button");
+      moreBtn.type = "button";
+      moreBtn.className = "btn-load-more";
+      moreBtn.setAttribute("data-action", "load-more-standards");
+      container.parentElement.appendChild(moreBtn);
+    }
+    moreBtn.textContent = `성취기준 더 보기 (+20건) — 남은 기준: ${filtered.length - displayList.length}건`;
+  } else if (moreBtn) {
+    moreBtn.remove();
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -830,7 +1243,7 @@ function renderStep4(pill, title, subtitle, box) {
     <div class="choice-grid-cards" style="grid-template-columns: 1fr;">
       ${suggestions.map((thm, i) => `
         <div class="choice-bubble-card ${appState.plan.theme === thm ? 'selected' : ''}" 
-             role="button" tabindex="0"
+             role="button" tabindex="0" aria-pressed="${appState.plan.theme === thm}"
              data-action="select-theme" data-val="${escapeHtml(thm)}">
           <div class="choice-card-top">
             <span class="choice-card-badge">추천 주제 0${i + 1}</span>
@@ -911,7 +1324,7 @@ function renderStep5(pill, title, subtitle, box) {
                  style="width: 110px; font-size: 1.4rem; font-family: 'Jua', sans-serif; text-align: center; padding: 0.6rem;" 
                  value="${escapeHtml(appState.plan.periodCount)}" 
                  data-model="periodCount">
-          <span style="font-family: 'Jua', sans-serif; font-size: 1.3rem; color: var(--primary-pink);">차시</span>
+          <span style="font-family: 'Jua', sans-serif; font-size: 1.3rem; color: var(--primary-accent);">차시</span>
         </div>
 
         <div style="font-size: 0.88rem; color: var(--text-muted); margin-top: 0.5rem;">
@@ -920,6 +1333,7 @@ function renderStep5(pill, title, subtitle, box) {
         <div class="pill-option-group">
           ${quickOptions.map(opt => `
             <button type="button" class="pill-option-btn ${appState.plan.periodCount === opt.count ? 'selected' : ''}" 
+                    aria-pressed="${appState.plan.periodCount === opt.count}"
                     data-action="select-period-count" data-val="${opt.count}">
               ${escapeHtml(opt.label)}
             </button>
@@ -940,7 +1354,7 @@ function renderStep5(pill, title, subtitle, box) {
             const isSel = appState.plan.difficultyLevel.includes(lvl.title);
             return `
               <div class="choice-bubble-card ${isSel ? 'selected' : ''}" 
-                   role="button" tabindex="0"
+                   role="button" tabindex="0" aria-pressed="${isSel}"
                    style="padding: 0.95rem 1.1rem;" 
                    data-action="select-difficulty" data-val="${escapeHtml(`${lvl.title} (${lvl.desc})`)}">
                 <span style="font-family: 'Jua', sans-serif; font-size: 1.1rem; color: var(--text-main);">${escapeHtml(lvl.title)}</span>
@@ -965,7 +1379,7 @@ function getRatioBannerHtml(periodCount) {
     <div class="ratio-banner-box" style="margin-top: 0.8rem;">
       <div style="font-family: 'Jua', sans-serif; font-size: 0.96rem; color: var(--text-main); display: flex; justify-content: space-between;">
         <span>🎯 차시 배분 비율: 사전 4 : 현장 2 : 사후 4</span>
-        <span style="color: var(--primary-pink); font-weight: 800;">총 ${total}차시</span>
+        <span style="color: var(--primary-accent); font-weight: 800;">총 ${total}차시</span>
       </div>
       <div class="ratio-bar-wrapper">
         <div class="ratio-bar-segment pre" style="width: ${prePct}%;"></div>
@@ -1000,7 +1414,7 @@ function renderStep6(pill, title, subtitle, box) {
     <div class="choice-grid-cards">
       ${EVALUATION_FOCUS_OPTIONS.map(ef => `
         <div class="choice-bubble-card ${appState.plan.evalFocusId === ef.id ? 'selected' : ''}" 
-             role="button" tabindex="0"
+             role="button" tabindex="0" aria-pressed="${appState.plan.evalFocusId === ef.id}"
              data-action="select-eval-focus" data-id="${escapeHtml(ef.id)}" data-val="${escapeHtml(ef.title)}">
           <div class="choice-card-top">
             <span class="choice-card-badge">평가 관점</span>
@@ -1014,7 +1428,7 @@ function renderStep6(pill, title, subtitle, box) {
 }
 
 // ----------------------------------------------------------------------------
-// 7단계: 학습 목표 설정 (P0: ReferenceError 방지 및 양방향 모델링)
+// 7단계: 학습 목표 설정
 // ----------------------------------------------------------------------------
 function renderStep7(pill, title, subtitle, box) {
   pill.textContent = "7단계: 체험학습 목표 설정";
@@ -1024,7 +1438,7 @@ function renderStep7(pill, title, subtitle, box) {
   box.innerHTML = `
     <div style="display: flex; flex-direction: column; gap: 1rem;">
       <div class="choice-bubble-card selected" style="cursor: default;">
-        <label for="goalKnowledgeInput" style="font-family: 'Jua', sans-serif; font-size: 0.95rem; color: var(--primary-pink); display: block; margin-bottom: 0.3rem;">[지식·이해 목표]</label>
+        <label for="goalKnowledgeInput" style="font-family: 'Jua', sans-serif; font-size: 0.95rem; color: var(--primary-accent); display: block; margin-bottom: 0.3rem;">[지식·이해 목표]</label>
         <input type="text" class="soft-text-input" id="goalKnowledgeInput" style="padding: 0.75rem 1rem; font-size: 1rem;" 
                value="${escapeHtml(appState.plan.goalKnowledge)}" 
                data-model="goalKnowledge">
@@ -1048,7 +1462,7 @@ function renderStep7(pill, title, subtitle, box) {
 }
 
 // ----------------------------------------------------------------------------
-// 8단계: 장애특성 및 맞춤 지원 (개인정보 보호 원칙 강화)
+// 8단계: 장애특성 및 맞춤 지원 (개인정보 보호 & 태그 일관성 P1 #14)
 // ----------------------------------------------------------------------------
 function renderStep8(pill, title, subtitle, box) {
   pill.textContent = "8단계: 장애특성 및 맞춤 지원";
@@ -1095,7 +1509,7 @@ function renderStep9(pill, title, subtitle, box) {
     <div class="choice-grid-cards">
       ${TEACHING_METHOD_OPTIONS.map(m => `
         <div class="choice-bubble-card ${appState.plan.teachingMethod.includes(m.name) ? 'selected' : ''}" 
-             role="button" tabindex="0"
+             role="button" tabindex="0" aria-pressed="${appState.plan.teachingMethod.includes(m.name)}"
              data-action="select-teaching-method" data-val="${escapeHtml(m.name)}">
           <div class="choice-card-top">
             <span class="choice-card-badge">${escapeHtml(m.badge)}</span>
@@ -1109,7 +1523,7 @@ function renderStep9(pill, title, subtitle, box) {
 }
 
 // ----------------------------------------------------------------------------
-// 10단계: UDL 최종 교육과정 결과물 (장소별 동적 팩 반영)
+// 10단계: UDL 최종 교육과정 결과물
 // ----------------------------------------------------------------------------
 function renderStep10(pill, title, subtitle, box) {
   pill.textContent = "10단계: UDL 최종 교육과정 결과물";
@@ -1118,6 +1532,7 @@ function renderStep10(pill, title, subtitle, box) {
 
   const p = appState.plan;
   const periods = generatePeriodsDataWithStandards(p);
+  const doc = buildPlanDocument(p, periods);
   const actPack = getActiveActivityPack(p.locationId, p.locationName);
 
   box.innerHTML = `
@@ -1139,23 +1554,23 @@ function renderStep10(pill, title, subtitle, box) {
           <tbody>
             <tr>
               <th style="width: 25%;">프로젝트명</th>
-              <td><strong>${escapeHtml(p.theme)}</strong></td>
+              <td><strong>${escapeHtml(doc.theme)}</strong></td>
             </tr>
             <tr>
               <th>학교급 및 장소</th>
-              <td><strong>${escapeHtml(p.schoolLevel)}</strong> | ${escapeHtml(p.locationName)} (총 ${p.periodCount}차시 [사전·현장·사후 4:2:4 비율] / ${escapeHtml(p.difficultyLevel)})</td>
+              <td><strong>${escapeHtml(doc.schoolLevel)}</strong> | ${escapeHtml(doc.locationName)} (총 ${doc.periodCount}차시 [사전·현장·사후 4:2:4 비율] / ${escapeHtml(doc.difficultyLevel)})</td>
             </tr>
             <tr>
               <th>수업 방식 및 평가</th>
-              <td>${escapeHtml(p.teachingMethod)} | ${escapeHtml(p.evalFocusTitle)}</td>
+              <td>${escapeHtml(doc.teachingMethod)} | ${escapeHtml(p.evalFocusTitle)}</td>
             </tr>
             <tr>
               <th>핵심 질문 (Essential Question)</th>
-              <td>"우리 마을 ${escapeHtml(p.locationName)}에서 나에게 필요한 것을 스스로 찾고 안전하게 참여하려면 어떻게 해야 할까?"</td>
+              <td>"우리 마을 ${escapeHtml(doc.locationName)}에서 나에게 필요한 것을 스스로 찾고 안전하게 참여하려면 어떻게 해야 할까?"</td>
             </tr>
             <tr>
               <th>연계 핵심 성취기준</th>
-              <td>${p.standards.map(s => `<strong>${escapeHtml(s.code)}</strong> ${escapeHtml(s.title || s.subject)}`).join(", ")}</td>
+              <td>${(p.standards || []).map(s => `<strong>${escapeHtml(s.code)}</strong> ${escapeHtml(s.title || s.subject || '')}`).join(", ")}</td>
             </tr>
           </tbody>
         </table>
@@ -1228,7 +1643,7 @@ function renderStep10(pill, title, subtitle, box) {
         `}).join("")}
       </div>
 
-      <!-- 4) 교수·학습 자료 제작 지원 (장소 특화 PPT 및 활동지) -->
+      <!-- 4) 교수·학습 자료 제작 지원 -->
       <div class="result-section-box">
         <h2 class="result-section-title">4. 교수·학습 자료 제작 지원 (PPT 슬라이드 및 활동지)</h2>
         <div style="font-family: 'Jua', sans-serif; font-size: 1.1rem; margin-bottom: 0.5rem; color: var(--text-main);">
@@ -1239,7 +1654,7 @@ function renderStep10(pill, title, subtitle, box) {
             <div class="ppt-slide-num">슬라이드 01</div>
             <div class="ppt-slide-title">오늘의 탐험 떠나기</div>
             <ul class="ppt-slide-bullets">
-              <li>${escapeHtml(p.locationName)} 실물 사진 및 영상</li>
+              <li>${escapeHtml(doc.locationName)} 실물 사진 및 영상</li>
               <li>${escapeHtml(actPack.pptMission)}</li>
             </ul>
           </div>
@@ -1283,63 +1698,72 @@ function renderStep10(pill, title, subtitle, box) {
 }
 
 // ----------------------------------------------------------------------------
-// 11단계: 공문서 기안 서식 합성 및 완료 안내 (투명한 안내 및 파일 반영)
+// 11단계: 공문서 기안 서식 합성 및 완료 안내 (P0 #1, #2)
 // ----------------------------------------------------------------------------
 function renderStep11(pill, title, subtitle, box) {
   pill.textContent = "11단계: 공문서 기안 서식 반영";
   title.textContent = "공문서 기안 서식에 설계 내용이 완벽히 반영되었습니다.";
-  subtitle.textContent = "표준 공문서 양식(.hwpx)에 UDL 교육과정이 자동 합성되어 있습니다. 필요시 학교 전용 서식을 등록할 수 있습니다.";
+  subtitle.textContent = "표준 공문서 양식(.hwpx)에 UDL 교육과정이 자동 합성됩니다. 학교 전용 서식(.hwpx)을 등록하여 그대로 활용할 수도 있습니다.";
 
   const p = appState.plan;
+  const doc = buildPlanDocument(p, generatePeriodsDataWithStandards(p));
+  const hasCustom = Boolean(appState.uploadedTemplateBuffer && p.uploadedFileName);
 
   box.innerHTML = `
-    <!-- 업로드 드롭존 -->
-    <div class="template-upload-zone" data-action="trigger-file-upload">
+    <!-- 업로드 드롭존 (버블링 간섭 없는 단독 카드) -->
+    <div class="template-upload-zone" id="templateUploadZone" role="button" tabindex="0" data-action="trigger-file-upload">
       <div class="upload-icon-bubble">HWP</div>
-      <div class="upload-title">학교 고유 계획서 양식 추가 등록 (.hwpx, .hwp, .docx)</div>
-      <div class="upload-desc">클릭하여 학교 전용 서식을 선택하면 기안 파일 정보로 즉시 동기화됩니다. (현재 기본 내장 공문서 양식 적용 완료)</div>
-      <input type="file" id="schoolTemplateFileInput" style="display: none;" accept=".hwpx,.hwp,.docx,.txt">
+      <div class="upload-title">${hasCustom ? `학교 서식 등록됨: ${escapeHtml(p.uploadedFileName)}` : '학교 고유 계획서 양식 추가 등록 (.hwpx)'}</div>
+      <div class="upload-desc">
+        ${hasCustom 
+          ? '선택하신 학교 고유 .hwpx 서식에 UDL 설계 데이터가 실제 합성됩니다. 클릭하여 다른 서식으로 변경할 수 있습니다.' 
+          : '클릭하여 학교 전용 .hwpx 서식을 선택하면 해당 양식에 본문 내용이 직접 주입되어 기안문으로 다운로드됩니다. (미등록 시 교육부 표준 기안 서식 자동 적용)'}
+      </div>
     </div>
+    <!-- 파일 input은 버블링 간섭 방지를 위해 영역 외부에 단독 배치 -->
+    <input type="file" id="schoolTemplateFileInput" style="display: none;" accept=".hwpx">
 
     <!-- 양식 자동 반영 미리보기 카드 -->
     <div class="merged-plan-card">
       <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.85rem; flex-wrap: wrap; gap: 0.5rem;">
         <span style="font-family: 'Jua', sans-serif; font-size: 1.25rem; color: #065f46;">
-          [기안 준비 완료] ${escapeHtml(p.uploadedFileName)}
+          [기안 준비 완료] ${escapeHtml(hasCustom ? p.uploadedFileName : '교육부 표준 현장체험학습 기안양식.hwpx')}
         </span>
-        <span style="background: #d1fae5; color: #065f46; font-size: 0.8rem; font-weight: 700; padding: 0.25rem 0.75rem; border-radius: 20px;">
-          표준 기안 서식 + UDL 설계안 합성 완료
+        <span style="background: ${hasCustom ? '#dcfce7' : '#d1fae5'}; color: #065f46; font-size: 0.8rem; font-weight: 700; padding: 0.25rem 0.75rem; border-radius: 20px;">
+          ${hasCustom ? '학교 고유 서식 실제 합성 모드' : '표준 기안 서식 자동 합성 모드'}
         </span>
       </div>
       <div style="font-size: 0.92rem; color: var(--text-main); line-height: 1.65; background: #f0fdf4; padding: 1.15rem; border-radius: 12px;">
-        <p><strong>수신:</strong> 내부결재 | <strong>제목:</strong> 2026학년도 ${escapeHtml(p.schoolLevel)} 특수학급 현장체험학습 운영 계획(안)</p>
-        <p><strong>1. 목적 및 주제:</strong> ${escapeHtml(p.theme)} (${escapeHtml(p.teachingMethod)})</p>
-        <p><strong>2. 체험 장소:</strong> ${escapeHtml(p.locationName)} (총 ${p.periodCount}차시 / ${escapeHtml(p.difficultyLevel)})</p>
-        <p><strong>3. 연계 성취기준:</strong> ${p.standards.map(s => escapeHtml(s.code)).join(", ")} 외</p>
-        <p><strong>4. 맞춤 지원 대책:</strong> ${escapeHtml(p.functionalNeeds.join(" / "))}</p>
+        <p><strong>수신:</strong> 내부결재 | <strong>제목:</strong> ${escapeHtml(doc.docTitle)}</p>
+        <p><strong>1. 목적 및 주제:</strong> ${escapeHtml(doc.theme)} (${escapeHtml(doc.teachingMethod)})</p>
+        <p><strong>2. 체험 장소:</strong> ${escapeHtml(doc.locationName)} (총 ${doc.periodCount}차시 / ${escapeHtml(doc.difficultyLevel)})</p>
+        <p><strong>3. 연계 성취기준:</strong> ${(p.standards || []).map(s => escapeHtml(s.code)).join(", ")}</p>
+        <p><strong>4. 맞춤 지원 대책:</strong> ${escapeHtml((p.functionalNeeds || []).join(" / "))}</p>
         <p><strong>5. 평가 중점:</strong> ${escapeHtml(p.evalFocusTitle)} (지식·기능·태도 3차원 평가)</p>
       </div>
       <div style="display: flex; gap: 0.6rem; justify-content: flex-end; margin-top: 1.1rem; flex-wrap: wrap;">
         <button type="button" class="btn-bubble-tool" data-action="reset-all">처음으로 다시 작성</button>
         <button type="button" class="btn-bubble-tool" data-action="copy-curriculum">기안문 텍스트 복사</button>
-        <button type="button" class="btn-soft-primary" data-action="download-hwpx">완성 계획서 다운로드 (.hwpx)</button>
+        <button type="button" class="btn-soft-primary" data-action="download-hwpx">
+          ${hasCustom ? '학교 서식 합성 다운로드 (.hwpx)' : '완성 계획서 다운로드 (.hwpx)'}
+        </button>
       </div>
     </div>
   `;
 }
 
 // ============================================================================
-// 차시별 상세 데이터 생성 (장소별 콘텐츠 팩 + 4:2:4 비율 분배)
+// 차시별 상세 데이터 생성 (장소별 콘텐츠 팩 + 4:2:4 비율 분배 + 다차시 순환 번호)
 // ============================================================================
-function generatePeriodsDataWithStandards(p) {
+export function generatePeriodsDataWithStandards(p) {
   const count = p.periodCount;
   const list = [];
-  const stdCodes = p.standards.map(s => s.code);
-  const primaryStd = stdCodes.length > 0 ? stdCodes[0] : "[공통]";
+  const stdCodes = (p.standards || []).map(s => s.code);
+  const primaryStd = stdCodes.length > 0 ? stdCodes[0] : "[실생활-자립]";
   const counts = calculatePeriodRatioCounts(count);
   const act = getActiveActivityPack(p.locationId, p.locationName);
 
-  // 사전 활동 풀 (4단계)
+  // 사전 활동 풀 (장소 특화 콘텐츠 팩 동적 연동, P1 #12)
   const preActivities = [
     {
       title: `사전 탐색: ${p.locationName} 탐험 계획 수립 및 가고 싶은 구역 탐색`,
@@ -1352,18 +1776,18 @@ function generatePeriodsDataWithStandards(p) {
       feedbackTip: "실물 사진 카드나 영상을 제시하여 낯선 장소에 대한 불안을 낮추고 흥미를 높입니다."
     },
     {
-      title: "사전 계획: 나의 활동 계획서(미션/구매 목록) 작성 및 준비물 점검",
-      summary: "개인 소지품 바구니 확인, 나만의 활동 미션 계획서 작성 및 가방 챙기기 연습.",
+      title: `사전 계획: 나의 탐험 계획서(미션 목록) 작성 및 준비물 점검`,
+      summary: `${act.preBody} 나만의 활동 미션 계획서 작성 및 가방 챙기기 연습.`,
       eval: "시각 단서(사진/픽토그램)를 활용하여 자신의 준비물과 미션 목록을 스스로 구성하는지 점검",
       intro: "체험학습에 필요한 가방, 복장, 안전 명찰을 확인합니다.",
-      body: "필요한 물품 사진 카드를 나만의 계획서에 부착하고 짝꿍과 점검하기.",
+      body: act.preBody,
       outro: "내 가방에 준비물이 빠짐없이 들어있는지 체크리스트로 확인하기.",
       questionExample: "우리가 내일 챙겨가야 할 가장 중요한 물건은 무엇일까요? 가방에 쏙 넣어볼까요?",
       feedbackTip: "글자 쓰기가 어려운 학생은 실물 사진 스티커나 AAC 선택 판을 활용합니다."
     },
     {
       title: `사전 모의: 교실 모의 체험: 이동, 인사 및 상호작용 롤플레잉`,
-      summary: `교실 내 간이 부스 구성, 모의 카드 태그 및 인사말, 도움 요청 연습.`,
+      summary: `${act.preOutro} 교실 내 간이 부스 구성, 모의 상호작용 및 도움 요청 연습.`,
       eval: "교실 모의 부스에서 단계적 촉진에 따라 상호작용 및 인사 표현을 수행하는지 점검",
       intro: `교실에 꾸며진 ${p.locationName} 모의 코너를 둘러보고 역할을 확인합니다.`,
       body: "직원 역할 교사에게 인사하기, 모의 카드 리더기에 카드 대어 결제하기.",
@@ -1376,7 +1800,7 @@ function generatePeriodsDataWithStandards(p) {
       summary: "보행 안전(신호등, 짝꿍 손잡기), 길을 잃었을 때 대처법(안내데스크/명찰 활용) 다짐.",
       eval: "비상 상황 발생 시 도움 요청 행동 및 에티켓 수칙 이해도 평가",
       intro: "현장에서 지켜야 할 3대 안전 약속 안내.",
-      body: "시각적 일과표 순서 암기, 짝꿍과 손잡고 걷기 연습, 비상 연락처 목걸이 확인.",
+      body: "시각적 일과표 순서 숙지, 짝꿍과 손잡고 걷기 연습, 비상 연락처 목걸이 확인.",
       outro: "안전 약속 다짐 손도장 찍기 및 현장체험학습 출발 준비 완료 선언.",
       questionExample: "만약 선생님이나 친구를 놓쳤을 때는 어떻게 행동해야 할까요?",
       feedbackTip: "비상시 대처를 위해 학생의 옷이나 가방에 시각적 긴급 연락처 카드를 부착합니다."
@@ -1464,24 +1888,34 @@ function generatePeriodsDataWithStandards(p) {
     let itemData;
     let phase = "pre";
     let phaseBadge = "사전 준비";
+    let cycleSuffix = "";
 
     if (i <= counts.pre) {
       phase = "pre";
       phaseBadge = "사전 준비";
       const pIdx = i - 1;
-      const tIdx = counts.pre === 4 ? pIdx : Math.floor((pIdx / counts.pre) * preActivities.length);
+      const tIdx = counts.pre <= 4 ? pIdx : pIdx % preActivities.length;
+      if (counts.pre > 4) {
+        cycleSuffix = ` (${Math.floor(pIdx / 4) + 1}회차)`;
+      }
       itemData = { ...preActivities[Math.min(tIdx, preActivities.length - 1)] };
     } else if (i <= counts.pre + counts.field) {
       phase = "field";
       phaseBadge = "현장 적용";
       const pIdx = i - counts.pre - 1;
-      const tIdx = counts.field === 2 ? pIdx : Math.floor((pIdx / counts.field) * fieldActivities.length);
+      const tIdx = counts.field <= 2 ? pIdx : pIdx % fieldActivities.length;
+      if (counts.field > 2) {
+        cycleSuffix = ` (${Math.floor(pIdx / 2) + 1}회차)`;
+      }
       itemData = { ...fieldActivities[Math.min(tIdx, fieldActivities.length - 1)] };
     } else {
       phase = "post";
       phaseBadge = "사후 정리";
       const pIdx = i - counts.pre - counts.field - 1;
-      const tIdx = counts.post === 4 ? pIdx : Math.floor((pIdx / counts.post) * postActivities.length);
+      const tIdx = counts.post <= 4 ? pIdx : pIdx % postActivities.length;
+      if (counts.post > 4) {
+        cycleSuffix = ` (${Math.floor(pIdx / 4) + 1}회차)`;
+      }
       itemData = { ...postActivities[Math.min(tIdx, postActivities.length - 1)] };
     }
 
@@ -1489,7 +1923,7 @@ function generatePeriodsDataWithStandards(p) {
       num: i,
       phase,
       phaseBadge,
-      title: itemData.title,
+      title: `${itemData.title}${cycleSuffix}`,
       standardsCodes: assignedCodes,
       summary: itemData.summary,
       eval: itemData.eval,
@@ -1504,14 +1938,15 @@ function generatePeriodsDataWithStandards(p) {
 }
 
 // ============================================================================
-// HWPX 다운로드, 클립보드 복사, PDF 인쇄 트리거
+// HWPX 다운로드, 클립보드 복사, PDF 인쇄 트리거 (SSOT buildPlanDocument 연동)
 // ============================================================================
 async function triggerHwpxDownload() {
   try {
     const periods = generatePeriodsDataWithStandards(appState.plan);
-    showToast("한글(HWPX) 공문서 파일을 생성하고 있습니다...", "info");
-    await generateAndDownloadHwpx(appState.plan, periods);
-    showToast("한글(HWPX) 파일이 성공적으로 다운로드되었습니다!", "success");
+    const hasCustom = Boolean(appState.uploadedTemplateBuffer);
+    showToast(hasCustom ? "학교 고유 서식에 내용을 합성하고 있습니다..." : "한글(HWPX) 공문서 파일을 생성하고 있습니다...", "info");
+    const result = await generateAndDownloadHwpx(appState.plan, periods, appState.uploadedTemplateBuffer);
+    showToast(result.isCustomTemplate ? "학교 서식에 합성된 .hwpx 파일이 다운로드되었습니다!" : "한글(HWPX) 표준 서식 파일이 성공적으로 다운로드되었습니다!", "success");
   } catch (err) {
     console.error("HWPX 다운로드 실패:", err);
     showToast("HWPX 생성 중 오류가 발생했습니다. 브라우저 콘솔을 확인해 주세요.", "error");
@@ -1522,17 +1957,19 @@ function triggerCopyCurriculum() {
   const p = appState.plan;
   const counts = calculatePeriodRatioCounts(p.periodCount);
   const periods = generatePeriodsDataWithStandards(p);
-  const text = `[2026학년도 ${p.schoolLevel} 특수교육 현장체험학습 교육과정 설계안]
+  const doc = buildPlanDocument(p, periods);
+
+  const text = `[${doc.docTitle}]
 
 1. 프로젝트 개요
-- 프로젝트명: ${p.theme}
-- 학교급 및 장소: ${p.schoolLevel} | ${p.locationName}
-- 차시 배분: 총 ${p.periodCount}차시 [사전 ${counts.pre}차시 : 현장 ${counts.field}차시 : 사후 ${counts.post}차시 (4:2:4 비율)] (${p.difficultyLevel})
-- 수업 방식: ${p.teachingMethod}
-- 핵심 질문: 우리 마을 ${p.locationName}에서 나에게 필요한 것을 스스로 찾고 안전하게 참여하려면 어떻게 해야 할까?
+- 프로젝트명: ${doc.theme}
+- 학교급 및 장소: ${doc.schoolLevel} | ${doc.locationName}
+- 차시 배분: 총 ${doc.periodCount}차시 [사전 ${counts.pre}차시 : 현장 ${counts.field}차시 : 사후 ${counts.post}차시 (4:2:4 비율)] (${doc.difficultyLevel})
+- 수업 방식: ${doc.teachingMethod}
+- 핵심 질문: 우리 마을 ${doc.locationName}에서 나에게 필요한 것을 스스로 찾고 안전하게 참여하려면 어떻게 해야 할까?
 
 2. 연계 성취기준
-${p.standards.map(s => `- ${s.code} ${s.title}: ${s.desc}`).join("\n")}
+${(p.standards || []).map(s => `- ${s.code} ${s.title || s.subject || ''}: ${s.desc || ''}`).join("\n")}
 
 3. 학습 목표
 - [지식] ${p.goalKnowledge}
@@ -1540,7 +1977,7 @@ ${p.standards.map(s => `- ${s.code} ${s.title}: ${s.desc}`).join("\n")}
 - [태도] ${p.goalAttitude}
 
 4. 참가 학생 맞춤 지원 대책 (익명화 완료)
-${p.functionalNeeds.join("\n")}
+${(p.functionalNeeds || []).join("\n")}
 
 5. 차시별 수업 계획 (사전:현장:사후 4:2:4 비율 구성)
 ${periods.map(item => `[${item.num}차시 / ${item.phaseBadge}] ${item.title} (연계: ${item.standardsCodes.join(', ')})\n  - 활동: ${item.summary}\n  - 평가: ${item.eval}`).join("\n\n")}
@@ -1582,14 +2019,12 @@ function triggerPrintPdf() {
   }
 }
 
-function showToast(msg, type = "info") {
+export function showToast(msg, type = "info") {
   const shelf = document.getElementById("toastShelf");
   if (!shelf) return;
 
   const t = document.createElement("div");
   t.className = `soft-toast ${type === "error" ? "toast-error" : type === "success" ? "toast-success" : ""}`;
-  t.setAttribute("role", "status");
-  t.setAttribute("aria-live", "polite");
   t.textContent = msg;
   shelf.appendChild(t);
 

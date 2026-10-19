@@ -1,0 +1,41 @@
+# Logs & Runtime
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build Outputs
+dist/
+dist-ssr/
+*.local
+
+# Environment variables & Sensitive configurations
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.cert
+
+# Editor & OS files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.DS_Store
+Thumbs.db
+
+# Temp & Cache
+.temp/
+.cache/
+
+# External reference libraries & Heavy local folders (웹 배포 시 불필요)
+kordoc-main/
+korean-secondary-learning-map-mcp-main/
+교육과정 성취기준 체크리스트/
+curriculum-all.json
+elementary-standards.json

@@ -98,8 +98,13 @@
 
 ## 4. 운영 및 배포 전 검증 체크리스트
 
-- [x] `npm run build` 프로덕션 빌드 정상 완료 (`dist/` 생성)
+- [x] `npm test` 자동화 단위 테스트 전건(15/15) 통과 검증 완료
+- [x] `npm run build` 프로덕션 빌드 정상 완료 (Vite 청크 분할로 메인 JS 96kB 경량화 달성, 500kB 초과 경고 0건)
 - [x] `npm audit` 취약점 검사 0건 확인
 - [x] CSP 및 보안 헤더 세팅 (`index.html`, `vercel.json`, `public/_headers`)
-- [x] 소스코드 및 비밀 정보 보호를 위한 `.gitignore` 구성 완료
-- [x] GitHub Pages 자동 배포 CI/CD 워크플로우 구성 완료
+- [x] 학교 고유 .hwpx 서식 메모리 버퍼 실제 단락 및 필드 합성 기능 검증 완료
+- [x] 단계별 입력 유효성 검증(`validateStep`) 및 세션 스토리지 방어적 복원 로직 탑재
+- [x] 성취기준 멀티라인 붙여넣기 및 `[직접-N]` 고유 ID 충돌 방지 로직 적용
+- [x] 고등학교 51개 전 교과목 드롭다운 필터 및 검색 결과 페이징 적용
+- [x] 소스코드 및 데이터 파이프라인(`build-curriculum.mjs`) 추적 구성 완료
+- [x] GitHub Pages 자동 배포 CI/CD 워크플로우에 단위 테스트 및 빌드 검증 반영 완료

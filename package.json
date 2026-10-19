@@ -4,13 +4,19 @@
   "private": true,
   "description": "2022 개정 특수교육 교육과정 재구성 현장체험학습 코칭 파트너 및 한글 공문서 기안기",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "vite --host --port 5173",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "build:curriculum": "node build-curriculum.mjs"
   },
   "devDependencies": {
-    "vite": "^8.3.4"
+    "vite": "^8.3.4",
+    "vitest": "^5.0.5"
   },
   "dependencies": {
     "jszip": "^3.10.2"

@@ -6,7 +6,20 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     assetsDir: 'assets',
-    sourcemap: false
+    sourcemap: false,
+    chunkSizeWarningLimit: 600,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('curriculum-data.js')) {
+            return 'curriculum-data';
+          }
+          if (id.includes('jszip')) {
+            return 'jszip-vendor';
+          }
+        }
+      }
+    }
   },
   server: {
     port: 5173,

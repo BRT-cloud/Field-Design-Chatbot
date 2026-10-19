@@ -58,6 +58,8 @@ function isAllowedHigh(c) {
 
 const middleList = [];
 const highList = [];
+const middleSeen = new Set();
+const highSeen = new Set();
 
 for (const c of courses) {
   const level = c.schoolLevel;
@@ -65,7 +67,11 @@ for (const c of courses) {
     const subj = c.subjectKorean;
     for (const s of (c.standards || [])) {
       const rawCode = s.code ? s.code.trim() : '';
+      if (!rawCode || rawCode === '[]') continue;
       const code = rawCode.startsWith('[') ? rawCode : `[${rawCode}]`;
+      if (middleSeen.has(code)) continue;
+      middleSeen.add(code);
+
       const fullText = textsMap.get(s.key) || textsMap.get(code) || s.summary || '';
       const title = s.domainKorean ? `${subj} (${s.domainKorean})` : subj;
 
@@ -81,7 +87,11 @@ for (const c of courses) {
     const subj = c.subjectKorean;
     for (const s of (c.standards || [])) {
       const rawCode = s.code ? s.code.trim() : '';
+      if (!rawCode || rawCode === '[]') continue;
       const code = rawCode.startsWith('[') ? rawCode : `[${rawCode}]`;
+      if (highSeen.has(code)) continue;
+      highSeen.add(code);
+
       const fullText = textsMap.get(s.key) || textsMap.get(code) || s.summary || '';
       const title = s.domainKorean ? `${subj} (${s.domainKorean})` : subj;
 
