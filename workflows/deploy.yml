@@ -36,6 +36,9 @@ jobs:
       - name: Security Vulnerability Audit
         run: npm audit --audit-level=high
 
+      - name: Run Automated Unit Tests
+        run: npm test
+
       - name: Build Production Assets
         run: npm run build
 
