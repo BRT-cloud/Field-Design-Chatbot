@@ -1,5 +1,23 @@
-import JSZip from 'jszip';
 import { HWPX_TEMPLATE_BASE64 } from './hwpx-template-base64.js';
+
+/**
+ * JSZip 인스턴스 획득 헬퍼
+ * 브라우저 환경(window.JSZip) 및 Node/테스트 환경(dynamic import) 모두 지원
+ */
+async function getJSZip() {
+  if (typeof window !== 'undefined' && window.JSZip) {
+    return window.JSZip;
+  }
+  if (typeof globalThis !== 'undefined' && globalThis.JSZip) {
+    return globalThis.JSZip;
+  }
+  try {
+    const mod = await import('jszip');
+    return mod.default || mod;
+  } catch (err) {
+    throw new Error('JSZip 라이브러리를 로드할 수 없습니다: ' + (err?.message || err));
+  }
+}
 
 /**
  * 안전한 XML 이스케이프 유틸리티
@@ -96,16 +114,92 @@ export function buildPlanDocument(plan, periodsList) {
 }
 
 /**
+ * 플랜 텍스트 단일 진실 공급원(SSOT)
+ * HWPX PrvText, 클립보드 복사 텍스트, 플레인 텍스트 다운로드 등에서 공통 사용
+ */
+export function formatPlanText(plan, periodsList) {
+  const doc = buildPlanDocument(plan, periodsList);
+  return `[${doc.docTitle}]\n${doc.orgName}\n\n[개요]\n${doc.docSummary}\n\n${doc.bodyParagraphs.join("\n")}\n`;
+}
+
+/**
+ * 차시별 세부 운영 계획을 위한 표준 HWPX 네이티브 표 XML 생성기
+ */
+export function buildPeriodTableXml(periodsList) {
+  if (!periodsList || periodsList.length === 0) return "";
+
+  const colWidths = [6000, 11000, 15000, 8000];
+  const totalW = 40000;
+  const headerCols = ["차시 (구분)", "수업 주제", "주요 교수·학습 활동", "평가 관점"];
+
+  const headerCells = headerCols.map((col, idx) => `
+    <hp:tc name="" header="1" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="2">
+      <hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">
+        <hp:p id="0" paraPrIDRef="2" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">
+          <hp:run charPrIDRef="2"><hp:t>${escapeXml(col)}</hp:t></hp:run>
+        </hp:p>
+      </hp:subList>
+      <hp:cellAddr colAddr="${idx}" rowAddr="0"/>
+      <hp:cellSpan colSpan="1" rowSpan="1"/>
+      <hp:cellSz width="${colWidths[idx]}" height="1200"/>
+      <hp:cellMargin left="141" right="141" top="141" bottom="141"/>
+    </hp:tc>
+  `).join("");
+
+  const rowCount = periodsList.length + 1;
+  const rows = [`<hp:tr>${headerCells}</hp:tr>`];
+
+  periodsList.forEach((p, rIdx) => {
+    const rowAddr = rIdx + 1;
+    const badge = p.phaseBadge ? `\n(${p.phaseBadge})` : "";
+    const cellsData = [
+      `${p.num}차시${badge}`,
+      p.title || "",
+      p.summary || "",
+      p.eval || ""
+    ];
+
+    const cellsXml = cellsData.map((txt, cIdx) => `
+      <hp:tc name="" header="0" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="3">
+        <hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">
+          <hp:p id="0" paraPrIDRef="${cIdx === 0 ? "2" : "0"}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">
+            <hp:run charPrIDRef="0"><hp:t>${escapeXml(txt)}</hp:t></hp:run>
+          </hp:p>
+        </hp:subList>
+        <hp:cellAddr colAddr="${cIdx}" rowAddr="${rowAddr}"/>
+        <hp:cellSpan colSpan="1" rowSpan="1"/>
+        <hp:cellSz width="${colWidths[cIdx]}" height="1600"/>
+        <hp:cellMargin left="141" right="141" top="141" bottom="141"/>
+      </hp:tc>
+    `).join("");
+
+    rows.push(`<hp:tr>${cellsXml}</hp:tr>`);
+  });
+
+  return `<hp:p id="1900500000" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0"><hp:tbl id="1900500001" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="1" rowCnt="${rowCount}" colCnt="4" cellSpacing="0" borderFillIDRef="3" noAdjust="0"><hp:sz width="${totalW}" widthRelTo="ABSOLUTE" height="${1200 + periodsList.length * 1600}" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="0" affectLSpacing="0" flowWithText="1" allowOverlap="1" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="COLUMN" vertAlign="TOP" horzAlign="CENTER" vertOffset="0" horzOffset="0"/><hp:outMargin left="0" right="0" top="141" bottom="283"/><hp:inMargin left="141" right="141" top="141" bottom="141"/>${rows.join("")}</hp:tbl><hp:t></hp:t></hp:run></hp:p>`;
+}
+
+/**
  * plan 객체와 차시 목록, 그리고 사용자 지정 커스텀 템플릿(ArrayBuffer)을 받아
  * 유효한 .hwpx 파일을 생성하고 다운로드합니다.
  */
 export async function generateAndDownloadHwpx(plan, periodsList, customTemplateBuffer = null) {
   try {
+    const JSZip = await getJSZip();
     let zip = null;
     let isCustomTemplate = false;
 
-    // 1. 커스텀 템플릿 제공 시 우선 로드 검증
+    // 1. 커스텀 템플릿 제공 시 크기 및 Zip 매직 넘버 방어적 검증 (P1/S3)
     if (customTemplateBuffer && customTemplateBuffer.byteLength > 0) {
+      if (customTemplateBuffer.byteLength > 30 * 1024 * 1024) {
+        throw new Error("서식 파일 크기가 30MB를 초과하여 안전상 처리할 수 없습니다.");
+      }
+      const view = new Uint8Array(customTemplateBuffer.slice(0, 4));
+      const isZip = view[0] === 0x50 && view[1] === 0x4B && view[2] === 0x03 && view[3] === 0x04;
+      if (!isZip) {
+        throw new Error("올바른 HWPX(Zip 압축) 문서 형식이 아닙니다.");
+      }
+
       try {
         const customZip = await JSZip.loadAsync(customTemplateBuffer);
         if (customZip.file("Contents/section0.xml")) {
@@ -156,11 +250,23 @@ export async function generateAndDownloadHwpx(plan, periodsList, customTemplateB
       secXml = secXml.replace(summaryRegex, `$1<hp:t>${escapeXml(docSummary)}</hp:t>`);
     }
 
-    // 6. 본문 단락 태그 생성 및 </hs:sec> 직전에 주입
-    const extraParagraphsXml = bodyParagraphs.map((line, pIdx) => {
+    // 6. 본문 서식(단락 위계 및 표) 생성 (P0/H1, H2)
+    const tableXml = buildPeriodTableXml(periodsList);
+    let extraParagraphsXml = "";
+
+    bodyParagraphs.forEach((line, pIdx) => {
       const escaped = escapeXml(line);
-      return `<hp:p id="${1900000000 + pIdx}" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="0"><hp:t>${escaped}</hp:t></hp:run></hp:p>`;
-    }).join("");
+      const isMainHeading = /^\d+\.\s/.test(line);
+      const paraPrRef = isMainHeading ? "1" : "0";
+      const charPrRef = isMainHeading ? "2" : "0";
+
+      extraParagraphsXml += `<hp:p id="${1900000000 + pIdx}" paraPrIDRef="${paraPrRef}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0"><hp:run charPrIDRef="${charPrRef}"><hp:t>${escaped}</hp:t></hp:run></hp:p>`;
+
+      // 5번 "차시별 세부 운영 계획" 제목 바로 아래에 네이티브 표 삽입
+      if (line.startsWith("5. 차시별 세부 운영 계획") && tableXml) {
+        extraParagraphsXml += tableXml;
+      }
+    });
 
     if (secXml.includes("</hs:sec>")) {
       secXml = secXml.replace("</hs:sec>", `${extraParagraphsXml}</hs:sec>`);
@@ -170,8 +276,8 @@ export async function generateAndDownloadHwpx(plan, periodsList, customTemplateB
 
     zip.file("Contents/section0.xml", secXml);
 
-    // 7. 미리보기 텍스트 파일 동기화
-    const prvText = `${docTitle}\n${orgName}\n\n${docSummary}\n\n${bodyParagraphs.join("\n")}`;
+    // 7. 미리보기 텍스트 파일 동기화 (SSOT formatPlanText 사용)
+    const prvText = formatPlanText(plan, periodsList);
     zip.file("Preview/PrvText.txt", prvText);
 
     // 8. .hwpx Zip 바이너리 생성

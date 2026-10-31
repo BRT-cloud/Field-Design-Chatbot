@@ -14,9 +14,6 @@ export default defineConfig({
           if (id.includes('curriculum-data.js')) {
             return 'curriculum-data';
           }
-          if (id.includes('jszip')) {
-            return 'jszip-vendor';
-          }
         }
       }
     }
