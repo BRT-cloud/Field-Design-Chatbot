@@ -507,47 +507,81 @@ function generateStep9Forecast(plan, ctx) {
 }
 
 // ----------------------------------------------------------------------------
-// 10단계: UDL 최종 교육과정 결과물
+// 10단계: UDL 최종 교육과정 결과물 (차시 계획 실시간 수정 챗봇 브리핑)
 // ----------------------------------------------------------------------------
 function generateStep10Forecast(plan, ctx) {
+  const count = parseInt(plan.periodCount, 10) || 10;
+  const counts = calculatePeriodRatioCounts(count);
+  const overrideMap = (plan.periodOverrides && typeof plan.periodOverrides === 'object') ? plan.periodOverrides : {};
+  const overrideKeys = Object.keys(overrideMap);
+  const locName = plan.locationName || '체험 장소';
+
   const forecasts = [
-    '전체 1~9단계의 모든 선택과 맞춤 데이터가 UDL 차시별 상세 지도안으로 완벽히 통합되었습니다.',
-    '상단 [한글(HWPX) 다운로드] 버튼을 누르면 표준 한글 양식으로 즉시 내려받을 수 있습니다.'
+    `사전(${counts.pre}차시) · 현장(${counts.field}차시) · 사후(${counts.post}차시) 황금 비율로 총 ${count}차시 계획이 구성되었습니다.`,
+    overrideKeys.length > 0
+      ? `현재 ${overrideKeys.map(k => `${k}차시`).join(', ')}에 교사 맞춤형 개별 수정이 반영되어 있습니다.`
+      : '하단 챗창에 "3차시 활동을 계산대 역할극으로 바꿔줘"처럼 입력하여 원하는 차시를 실시간으로 수정할 수 있습니다.'
   ];
+
+  const proposals = [];
+  const firstFieldPeriod = counts.pre + 1;
+  if (firstFieldPeriod <= count && !overrideMap[String(firstFieldPeriod)]) {
+    proposals.push({
+      id: `prop-step10-field-${firstFieldPeriod}`,
+      title: `${firstFieldPeriod}차시(현장) 자기주도 미션 강화`,
+      reason: `${locName} 현장에서 학생이 직접 선택·결제·소통하는 실전 미션을 강조합니다.`,
+      periodNum: firstFieldPeriod,
+      patch: {
+        changes: {
+          periodOverrides: {
+            [firstFieldPeriod]: {
+              title: `${firstFieldPeriod}차시 맞춤: ${locName} 자기주도 선택 및 소통 미션`,
+              summary: `시각 단서와 AAC를 활용하여 ${locName} 현장에서 스스로 목표물 찾고 상호작용 완수하기`,
+              eval: '최소 촉진 하에 현장 미션 및 의사소통을 스스로 수행하는지 실기 관찰'
+            }
+          }
+        }
+      }
+    });
+  }
+
+  if (overrideKeys.length > 0) {
+    proposals.push({
+      id: 'prop-step10-reset-overrides',
+      title: '개별 차시 맞춤 수정 전체 초기화',
+      reason: `수정한 ${overrideKeys.length}개 차시를 기본 자동 생성 계획안으로 되돌립니다.`,
+      patch: {
+        changes: {
+          periodOverrides: null
+        }
+      }
+    });
+  }
+
+  const warnings = [];
+  if (!plan.standards || plan.standards.length === 0) {
+    warnings.push('연계 성취기준이 비어 있습니다. 3단계에서 성취기준을 선택하면 차시별 성취기준 배정이 더욱 정교해집니다.');
+  }
 
   return {
     step: 10,
-    summary: 'UDL 10개 차시별 상세 지도안 생성 완료',
+    summary: `총 ${count}차시 계획안 (개별 차시 맞춤 수정 ${overrideKeys.length}건)`,
     forecasts,
-    proposals: [],
-    warnings: [],
+    proposals,
+    warnings,
     quickPrompts: [
-      '전체 계획안의 정합성을 검토해줘',
-      '차시별 활동에 빠진 안전 수칙이 있는지 점검해줘',
-      '공문서 기안 서식(11단계)으로 이동할게'
+      '1차시 활동을 시각적 일과표 탐색으로 바꿔줘',
+      '3차시 활동을 현장 역할극 중심으로 수정해줘',
+      '2차시 평가를 사진 카드 선택 관찰로 바꿔줘',
+      '총 8차시로 줄여줘',
+      '난이도를 기초 수준으로 낮춰줘'
     ]
   };
 }
 
-// ----------------------------------------------------------------------------
-// 11단계: 공문서 기안 서식 반영
-// ----------------------------------------------------------------------------
 function generateStep11Forecast(plan, ctx) {
-  const forecasts = [
-    '설계된 교육과정이 공문서 표준 서식(표, 개조식 번호 체계, 결재선)에 100% 자동 합성되었습니다.',
-    '학교 고유 서식이 있다면 [학교 전용 서식 등록]을 통해 학교 고유 틀을 그대로 유지하며 내용을 채울 수 있습니다.'
-  ];
-
   return {
-    step: 11,
-    summary: '공문서 기안 서식(.hwpx) 준비 완료',
-    forecasts,
-    proposals: [],
-    warnings: [],
-    quickPrompts: [
-      '학교 자체 HWPX 양식에 어떻게 적용해?',
-      '결재 올리기 전 최종 점검할 항목이 뭐야?',
-      '클립보드에 전체 내용 복사하는 방법 알려줘'
-    ]
+    ...generateStep10Forecast(plan, ctx),
+    step: 11
   };
 }

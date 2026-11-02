@@ -17,8 +17,16 @@ import {
 import { 
   generateAndDownloadHwpx, 
   buildPlanDocument,
-  getAcademicYear 
+  getAcademicYear,
+  formatPlanText
 } from './hwpx-generator.js';
+import { CoachPanel } from './coach/coach-panel.js';
+import {
+  initMotionController,
+  triggerStepTransition,
+  applyStepStaggerAndScrollMotion,
+  highlightEditedPeriod
+} from './motion/motion.js';
 
 // ============================================================================
 // 안전한 HTML 이스케이프 유틸리티 (XSS 원천 차단)
@@ -73,14 +81,15 @@ const DEFAULT_PLAN = {
     "소음 민감성 대비 저소음 휴식 쉼터 동선 1명"
   ],
   teachingMethod: "프로젝트 학습 (PBL)",
+  periodOverrides: {},
   uploadedFileName: "",
   uploadedFileMerged: false
 };
 
 export const appState = {
-  step: 1, // 1 ~ 11
+  step: 1, // 1 ~ 10
   plan: structuredClone(DEFAULT_PLAN),
-  uploadedTemplateBuffer: null, // 메모리 상의 HWPX ArrayBuffer
+  uploadedTemplateBuffer: null,
   standardsDisplayLimit: 20,
   standardsCurriculumPage: 1,
   standardsPageSize: 4,
@@ -88,6 +97,21 @@ export const appState = {
   showAllEvalFocus: false,
   showAllTeachingMethods: false
 };
+
+export const coachPanel = new CoachPanel({
+  getPlan: () => appState.plan,
+  setPlan: (newPlan) => { appState.plan = newPlan; },
+  getCurrentStep: () => appState.step,
+  onPlanChanged: (newPlan, meta = {}) => {
+    appState.plan = newPlan;
+    savePlanToSession();
+    renderStep(appState.step);
+    if (meta && meta.periodNum) {
+      requestAnimationFrame(() => highlightEditedPeriod(meta.periodNum));
+    }
+  },
+  showToast: (msg, type) => showToast(msg, type)
+});
 
 // ============================================================================
 // 장소별 특화 활동 팩
@@ -185,7 +209,7 @@ const LOCATION_ACTIVITY_PACKS = {
   }
 };
 
-function getActiveActivityPack(locId, locName) {
+export function getActiveActivityPack(locId, locName) {
   if (LOCATION_ACTIVITY_PACKS[locId]) {
     return LOCATION_ACTIVITY_PACKS[locId];
   }
@@ -251,35 +275,139 @@ export function validateStep(currentStep, plan) {
 }
 
 // ============================================================================
-// 세션 스토리지 영속화 및 검증 (P0 #8)
+// 세션 스토리지 영속화 및 검증 (P0 #8, C3)
 // ============================================================================
+export function sanitizePlan(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return structuredClone(DEFAULT_PLAN);
+  }
+
+  const safe = structuredClone(DEFAULT_PLAN);
+
+  if (typeof raw.academicYear === "number" && raw.academicYear > 2000 && raw.academicYear < 2100) {
+    safe.academicYear = raw.academicYear;
+  }
+  if (typeof raw.schoolLevel === "string" && raw.schoolLevel.trim()) {
+    safe.schoolLevel = raw.schoolLevel.trim();
+  }
+  if (typeof raw.locationId === "string") {
+    safe.locationId = raw.locationId.trim();
+  }
+  if (typeof raw.locationName === "string" && raw.locationName.trim()) {
+    safe.locationName = raw.locationName.trim();
+  }
+
+  if (Array.isArray(raw.standards)) {
+    const validStandards = raw.standards
+      .filter(s => s && typeof s === "object" && typeof s.code === "string" && s.code.trim())
+      .map(s => ({
+        id: typeof s.id === "string" ? s.id.trim() : `std-custom-${Math.random().toString(36).slice(2, 7)}`,
+        code: String(s.code).trim(),
+        title: typeof s.title === "string" ? s.title.trim() : "",
+        subject: typeof s.subject === "string" ? s.subject.trim() : "공통",
+        desc: typeof s.desc === "string" ? s.desc.trim() : ""
+      }));
+    if (validStandards.length > 0) {
+      safe.standards = validStandards;
+    }
+  }
+
+  if (typeof raw.customStandardInput === "string") {
+    safe.customStandardInput = raw.customStandardInput;
+  }
+  if (typeof raw.standardsSearchKeyword === "string") {
+    safe.standardsSearchKeyword = raw.standardsSearchKeyword;
+  }
+  if (typeof raw.standardsSubjectFilter === "string") {
+    safe.standardsSubjectFilter = raw.standardsSubjectFilter;
+  }
+
+  if (typeof raw.theme === "string" && raw.theme.trim()) {
+    safe.theme = raw.theme.trim();
+  }
+  safe.themeManuallyEdited = Boolean(raw.themeManuallyEdited);
+
+  if (Number.isInteger(raw.periodCount) && raw.periodCount >= 1 && raw.periodCount <= 30) {
+    safe.periodCount = raw.periodCount;
+  } else if (typeof raw.periodCount === "string") {
+    const parsed = parseInt(raw.periodCount, 10);
+    if (!isNaN(parsed) && parsed >= 1 && parsed <= 30) {
+      safe.periodCount = parsed;
+    }
+  }
+
+  if (typeof raw.difficultyLevel === "string") {
+    safe.difficultyLevel = raw.difficultyLevel.trim();
+  }
+  if (typeof raw.evalFocusId === "string") {
+    safe.evalFocusId = raw.evalFocusId.trim();
+  }
+  if (typeof raw.evalFocusTitle === "string") {
+    safe.evalFocusTitle = raw.evalFocusTitle.trim();
+  }
+
+  if (typeof raw.goalKnowledge === "string") {
+    safe.goalKnowledge = raw.goalKnowledge.trim();
+  }
+  if (typeof raw.goalSkill === "string") {
+    safe.goalSkill = raw.goalSkill.trim();
+  }
+  if (typeof raw.goalAttitude === "string") {
+    safe.goalAttitude = raw.goalAttitude.trim();
+  }
+
+  if (Array.isArray(raw.functionalNeeds)) {
+    safe.functionalNeeds = raw.functionalNeeds
+      .filter(item => typeof item === "string" && item.trim())
+      .map(item => item.trim());
+  }
+
+  if (typeof raw.teachingMethod === "string") {
+    safe.teachingMethod = raw.teachingMethod.trim();
+  }
+
+  safe.periodOverrides = {};
+  if (raw.periodOverrides && typeof raw.periodOverrides === "object" && !Array.isArray(raw.periodOverrides)) {
+    const allowedFields = ["title", "summary", "eval", "intro", "body", "outro"];
+    for (const [k, v] of Object.entries(raw.periodOverrides)) {
+      if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
+      const pNum = parseInt(k, 10);
+      if (isNaN(pNum) || pNum < 1 || pNum > safe.periodCount) continue;
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        const cleaned = {};
+        let hasValidField = false;
+        for (const f of allowedFields) {
+          if (typeof v[f] === "string" && v[f].trim()) {
+            cleaned[f] = v[f].trim().slice(0, 300);
+            hasValidField = true;
+          }
+        }
+        if (hasValidField) {
+          safe.periodOverrides[String(pNum)] = cleaned;
+        }
+      }
+    }
+  }
+
+  if (typeof raw.uploadedFileName === "string") {
+    safe.uploadedFileName = raw.uploadedFileName.trim();
+  }
+  safe.uploadedFileMerged = Boolean(raw.uploadedFileMerged);
+
+  return safe;
+}
+
 export function loadPlanFromSession() {
   try {
     const saved = sessionStorage.getItem(SESSION_STORAGE_KEY);
     if (!saved) return;
     const parsed = JSON.parse(saved);
     if (parsed && typeof parsed === "object") {
-      if (Number.isInteger(parsed.step) && parsed.step >= 1 && parsed.step <= 11) {
-        appState.step = parsed.step;
+      if (Number.isInteger(parsed.step) && parsed.step >= 1) {
+        appState.step = Math.min(parsed.step, 10);
       }
       if (parsed.plan && typeof parsed.plan === "object") {
-        const p = parsed.plan;
-        appState.plan = {
-          ...DEFAULT_PLAN,
-          ...p,
-          themeManuallyEdited: Boolean(p.themeManuallyEdited),
-          standards: Array.isArray(p.standards) 
-            ? p.standards.filter(s => s && typeof s === 'object' && s.code) 
-            : DEFAULT_PLAN.standards,
-          functionalNeeds: Array.isArray(p.functionalNeeds) 
-            ? p.functionalNeeds 
-            : DEFAULT_PLAN.functionalNeeds,
-          periodCount: Number.isInteger(p.periodCount) && p.periodCount >= 1 && p.periodCount <= 30 
-            ? p.periodCount 
-            : 10,
-          uploadedFileName: typeof p.uploadedFileName === 'string' ? p.uploadedFileName : "",
-          uploadedFileMerged: Boolean(p.uploadedFileMerged)
-        };
+        appState.plan = sanitizePlan(parsed.plan);
       }
     }
   } catch (err) {
@@ -321,10 +449,12 @@ function ensureDefaultStandards() {
 // ============================================================================
 if (typeof document !== 'undefined') {
   document.addEventListener("DOMContentLoaded", () => {
+    initMotionController();
     loadPlanFromSession();
     ensureDefaultStandards();
     renderStep(appState.step);
     setupEventDelegation();
+    coachPanel.mount();
   });
 }
 
@@ -357,7 +487,7 @@ function setupEventDelegation() {
         return;
       }
 
-      if (appState.step < 11) {
+      if (appState.step < 10) {
         goToStep(appState.step + 1);
       } else {
         handleResetConfirmation();
@@ -381,27 +511,68 @@ function setupEventDelegation() {
   }
 }
 
+function executeReset() {
+  appState.step = 1;
+  appState.plan = structuredClone(DEFAULT_PLAN);
+  appState.uploadedTemplateBuffer = null;
+  appState.themeCycleIndex = 0;
+  appState.standardsCurriculumPage = 1;
+  appState.showAllEvalFocus = false;
+  appState.showAllTeachingMethods = false;
+  ensureDefaultStandards();
+  savePlanToSession();
+  renderStep(1);
+  if (coachPanel) {
+    coachPanel.chatThreads = {};
+    coachPanel.undoStack = [];
+    coachPanel.dismissedProposals.clear();
+    coachPanel.saveState();
+    coachPanel.refresh();
+  }
+  showToast("1단계로 돌아왔습니다. 새로 설계를 시작합니다.", "info");
+}
+
 function handleResetConfirmation() {
-  const confirmed = window.confirm("작성 중인 모든 내용이 초기화됩니다. 처음부터 다시 설계하시겠습니까?");
-  if (confirmed) {
-    appState.step = 1;
-    appState.plan = structuredClone(DEFAULT_PLAN);
-    appState.uploadedTemplateBuffer = null;
-    appState.themeCycleIndex = 0;
-    appState.standardsCurriculumPage = 1;
-    appState.showAllEvalFocus = false;
-    appState.showAllTeachingMethods = false;
-    ensureDefaultStandards();
-    savePlanToSession();
-    renderStep(1);
-    showToast("1단계로 돌아왔습니다. 새로 설계를 시작합니다.", "info");
+  const dialog = document.getElementById("resetConfirmDialog");
+  if (dialog && typeof dialog.showModal === "function") {
+    dialog.showModal();
+    const cancelBtn = document.getElementById("cancelResetBtn");
+    const confirmBtn = document.getElementById("confirmResetBtn");
+
+    const cleanup = () => {
+      if (cancelBtn) cancelBtn.removeEventListener("click", onCancel);
+      if (confirmBtn) confirmBtn.removeEventListener("click", onConfirm);
+      dialog.removeEventListener("cancel", onCancel);
+    };
+
+    const onCancel = () => {
+      cleanup();
+      dialog.close();
+    };
+
+    const onConfirm = () => {
+      cleanup();
+      dialog.close();
+      executeReset();
+    };
+
+    if (cancelBtn) cancelBtn.addEventListener("click", onCancel, { once: true });
+    if (confirmBtn) confirmBtn.addEventListener("click", onConfirm, { once: true });
+    dialog.addEventListener("cancel", onCancel, { once: true });
+  } else {
+    const confirmed = window.confirm("작성 중인 모든 내용이 초기화됩니다. 처음부터 다시 설계하시겠습니까?");
+    if (confirmed) {
+      executeReset();
+    }
   }
 }
 
 function goToStep(targetStep) {
-  appState.step = Math.min(Math.max(targetStep, 1), 11);
+  const direction = targetStep < appState.step ? "prev" : "next";
+  appState.step = Math.min(Math.max(targetStep, 1), 10);
   savePlanToSession();
   renderStep(appState.step);
+  triggerStepTransition(direction);
   window.scrollTo({ top: 0, behavior: "smooth" });
   
   // 접근성을 위해 스텝 변경 시 질문 타이틀로 포커스 이동
@@ -893,16 +1064,19 @@ function handleInteractionKeydown(e) {
 }
 
 // ============================================================================
-// 스텝 렌더러 (총 11단계)
+// 스텝 렌더러 (총 10단계)
 // ============================================================================
 function renderStep(step) {
   const stepText = document.getElementById("stepCounterText");
   const stepFill = document.getElementById("stepProgressFill");
   const stepTrack = document.getElementById("stepProgressTrack");
   
-  if (stepText) stepText.textContent = `STEP ${String(step).padStart(2, '0')} / 11`;
-  if (stepFill) stepFill.style.width = `${(step / 11) * 100}%`;
-  if (stepTrack) stepTrack.setAttribute("aria-valuenow", String(step));
+  if (stepText) stepText.textContent = `STEP ${String(step).padStart(2, '0')} / 10`;
+  if (stepFill) stepFill.style.width = `${(step / 10) * 100}%`;
+  if (stepTrack) {
+    stepTrack.setAttribute("aria-valuenow", String(step));
+    stepTrack.setAttribute("aria-valuemax", "10");
+  }
 
   const prevBtn = document.getElementById("prevStepBtn");
   const nextBtn = document.getElementById("nextStepBtn");
@@ -910,9 +1084,9 @@ function renderStep(step) {
 
   if (prevBtn) prevBtn.style.visibility = step > 1 ? "visible" : "hidden";
   if (nextBtnText) {
-    if (step === 10) {
-      nextBtnText.textContent = "공문서 기안 서식 확인하기 >";
-    } else if (step === 11) {
+    if (step === 9) {
+      nextBtnText.textContent = "최종 차시 계획 생성하기 >";
+    } else if (step === 10) {
       nextBtnText.textContent = "처음으로 (다시 설계) >";
     } else {
       nextBtnText.textContent = "다음 단계 >";
@@ -943,7 +1117,6 @@ function renderStep(step) {
     case 8: renderStep8(pill, title, subtitle, box); break;
     case 9: renderStep9(pill, title, subtitle, box); break;
     case 10: renderStep10(pill, title, subtitle, box); break;
-    case 11: renderStep11(pill, title, subtitle, box); break;
     default: break;
   }
 
@@ -958,6 +1131,14 @@ function renderStep(step) {
         }
       }
     });
+  }
+
+  // 스텝별 등장 모션 및 10단계 스크롤 모션 바인딩
+  applyStepStaggerAndScrollMotion(step);
+
+  // 10단계(최종 차시 계획) 전용 챗봇 패널 동기화 (1~9단계는 자동 숨김)
+  if (typeof coachPanel !== 'undefined' && coachPanel && typeof coachPanel.refresh === 'function') {
+    coachPanel.refresh();
   }
 }
 
@@ -1700,12 +1881,12 @@ function renderStep9(pill, title, subtitle, box) {
 }
 
 // ----------------------------------------------------------------------------
-// 10단계: UDL 최종 교육과정 결과물 (목차 점프 칩 & 고정 헤더 & 독립 스크롤러)
+// 10단계: UDL 최종 교육과정 결과물 (목차 점프 칩 & 고정 헤더 & 독립 스크롤러 & 실시간 챗봇 수정)
 // ----------------------------------------------------------------------------
 function renderStep10(pill, title, subtitle, box) {
-  pill.textContent = "10단계: UDL 최종 교육과정 결과물";
-  title.textContent = "설계하신 특수교육 현장체험학습 교육과정안입니다.";
-  subtitle.textContent = "각 차시별 연계 성취기준과 세부 활동을 확인하고, 한글(HWPX) 또는 PDF 파일로 다운로드하세요.";
+  pill.textContent = "10단계: 최종 차시 계획 완성 및 실시간 챗봇 수정";
+  title.textContent = "설계하신 특수교육 현장체험학습 차시 계획안입니다.";
+  subtitle.textContent = "각 차시별 연계 성취기준과 세부 활동을 확인하고, 우측 챗봇을 통해 개별 차시나 전체 계획을 실시간으로 수정하세요.";
 
   const p = appState.plan;
   const periods = generatePeriodsDataWithStandards(p);
@@ -1713,20 +1894,20 @@ function renderStep10(pill, title, subtitle, box) {
   const actPack = getActiveActivityPack(p.locationId, p.locationName);
 
   box.innerHTML = `
-    <!-- 10단계 고정 헤더: 목차 바로가기 점프 칩 & 다운로드 도구 모음 -->
+    <!-- 10단계 고정 헤더: 스크롤 진행률 바 & 목차 바로가기 점프 칩 & 도구 모음 -->
     <div class="step10-fixed-header">
+      <div class="step10-scroll-progress-track" aria-hidden="true">
+        <div class="step10-scroll-progress-fill" id="step10ScrollProgressFill"></div>
+      </div>
       <div class="udl-toc-shelf">
-        <span style="font-family: 'Jua', sans-serif; font-size: 0.84rem; color: #64748b; margin-right: 0.1rem;">📌 목차:</span>
-        <button type="button" class="toc-chip-btn" data-action="jump-toc-section" data-id="sec-summary">1. 개요</button>
+        <span style="font-family: 'Jua', sans-serif; font-size: 0.84rem; color: #64748b; margin-right: 0.1rem;">목차:</span>
+        <button type="button" class="toc-chip-btn active-toc-chip" data-action="jump-toc-section" data-id="sec-summary">1. 개요</button>
         <button type="button" class="toc-chip-btn" data-action="jump-toc-section" data-id="sec-roadmap">2. 차시계획</button>
         <button type="button" class="toc-chip-btn" data-action="jump-toc-section" data-id="sec-detail">3. 세부계획안</button>
         <button type="button" class="toc-chip-btn" data-action="jump-toc-section" data-id="sec-materials">4. 자료제작</button>
       </div>
       <div class="export-action-shelf">
         <button type="button" class="btn-bubble-tool" data-action="copy-curriculum" style="font-size: 0.84rem; padding: 0.35rem 0.8rem;">내용 복사</button>
-        <button type="button" class="btn-bubble-tool" style="background: #ffe4e6; color: #e11d48; font-size: 0.84rem; padding: 0.35rem 0.8rem;" data-action="download-hwpx">
-          한글(HWPX) 다운로드
-        </button>
         <button type="button" class="btn-soft-primary" style="padding: 0.4rem 1.1rem; font-size: 0.85rem;" data-action="print-pdf">
           PDF 인쇄 / 저장
         </button>
@@ -1780,14 +1961,17 @@ function renderStep10(pill, title, subtitle, box) {
           </thead>
           <tbody>
             ${periods.map(item => `
-              <tr>
+              <tr data-period-num="${item.num}" class="${item.isOverridden ? 'period-row-edited' : ''}">
                 <td style="text-align: center; font-weight: 800; font-family: 'Jua', sans-serif;">
                   <div style="display: flex; flex-direction: column; align-items: center; gap: 0.3rem;">
                     <span class="phase-tag ${escapeHtml(item.phase)}">${escapeHtml(item.phaseBadge)}</span>
                     <span style="font-size: 1.05rem;">${item.num}차시</span>
                   </div>
                 </td>
-                <td><strong>${escapeHtml(item.title)}</strong></td>
+                <td>
+                  <strong>${escapeHtml(item.title)}</strong>
+                  ${item.isOverridden ? '<span class="period-edited-badge">챗봇 수정됨</span>' : ''}
+                </td>
                 <td>
                   ${item.standardsCodes.map(code => `<span class="linked-std-pill">${escapeHtml(code)}</span>`).join(" ")}
                 </td>
@@ -1810,11 +1994,12 @@ function renderStep10(pill, title, subtitle, box) {
           };
           const styleInfo = bgMap[item.phase] || bgMap.pre;
           return `
-          <div style="background: ${styleInfo.bg}; border: 2px solid ${styleInfo.border}; border-radius: 16px; padding: 1.3rem; margin-bottom: 0.9rem;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem;">
-              <span style="font-family: 'Jua', sans-serif; font-size: 1.25rem; color: ${styleInfo.color}; display: flex; align-items: center; gap: 0.5rem;">
+          <div class="period-detail-card ${item.isOverridden ? 'period-card-edited' : ''}" data-period-num="${item.num}" style="background: ${styleInfo.bg}; border: 2px solid ${styleInfo.border}; border-radius: 16px; padding: 1.3rem; margin-bottom: 0.9rem;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.6rem; flex-wrap: wrap; gap: 0.4rem;">
+              <span style="font-family: 'Jua', sans-serif; font-size: 1.25rem; color: ${styleInfo.color}; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
                 <span class="phase-tag ${escapeHtml(item.phase)}">${escapeHtml(item.phaseBadge)}</span>
                 <span>${item.num}차시: ${escapeHtml(item.title)}</span>
+                ${item.isOverridden ? '<span class="period-edited-badge">챗봇 수정됨</span>' : ''}
               </span>
               <div>
                 ${item.standardsCodes.map(code => `<span class="linked-std-pill">${escapeHtml(code)}</span>`).join(" ")}
@@ -1880,61 +2065,6 @@ function renderStep10(pill, title, subtitle, box) {
           <p>- <strong>적용 수준 워크시트:</strong> ${escapeHtml(actPack.worksheetApply)}</p>
           <p>- <strong>심화 수준 워크시트:</strong> ${escapeHtml(actPack.worksheetAdvanced)}</p>
         </div>
-      </div>
-    </div>
-  `;
-}
-
-// ----------------------------------------------------------------------------
-// 11단계: 공문서 기안 서식 합성 및 완료 안내 (P0 #1, #2)
-// ----------------------------------------------------------------------------
-function renderStep11(pill, title, subtitle, box) {
-  pill.textContent = "11단계: 공문서 기안 서식 반영";
-  title.textContent = "공문서 기안 서식에 설계 내용이 완벽히 반영되었습니다.";
-  subtitle.textContent = "표준 공문서 양식(.hwpx)에 UDL 교육과정이 자동 합성됩니다. 학교 전용 서식(.hwpx)을 등록하여 그대로 활용할 수도 있습니다.";
-
-  const p = appState.plan;
-  const doc = buildPlanDocument(p, generatePeriodsDataWithStandards(p));
-  const hasCustom = Boolean(appState.uploadedTemplateBuffer && p.uploadedFileName);
-
-  box.innerHTML = `
-    <!-- 업로드 드롭존 (버블링 간섭 없는 단독 카드) -->
-    <div class="template-upload-zone" id="templateUploadZone" role="button" tabindex="0" data-action="trigger-file-upload">
-      <div class="upload-icon-bubble">HWP</div>
-      <div class="upload-title">${hasCustom ? `학교 서식 등록됨: ${escapeHtml(p.uploadedFileName)}` : '학교 고유 계획서 양식 추가 등록 (.hwpx)'}</div>
-      <div class="upload-desc">
-        ${hasCustom 
-          ? '선택하신 학교 고유 .hwpx 서식에 UDL 설계 데이터가 실제 합성됩니다. 클릭하여 다른 서식으로 변경할 수 있습니다.' 
-          : '클릭하여 학교 전용 .hwpx 서식을 선택하면 해당 양식에 본문 내용이 직접 주입되어 기안문으로 다운로드됩니다. (미등록 시 교육부 표준 기안 서식 자동 적용)'}
-      </div>
-    </div>
-    <!-- 파일 input은 버블링 간섭 방지를 위해 영역 외부에 단독 배치 -->
-    <input type="file" id="schoolTemplateFileInput" style="display: none;" accept=".hwpx">
-
-    <!-- 양식 자동 반영 미리보기 카드 -->
-    <div class="merged-plan-card">
-      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.85rem; flex-wrap: wrap; gap: 0.5rem;">
-        <span style="font-family: 'Jua', sans-serif; font-size: 1.25rem; color: #065f46;">
-          [기안 준비 완료] ${escapeHtml(hasCustom ? p.uploadedFileName : '교육부 표준 현장체험학습 기안양식.hwpx')}
-        </span>
-        <span style="background: ${hasCustom ? '#dcfce7' : '#d1fae5'}; color: #065f46; font-size: 0.8rem; font-weight: 700; padding: 0.25rem 0.75rem; border-radius: 20px;">
-          ${hasCustom ? '학교 고유 서식 실제 합성 모드' : '표준 기안 서식 자동 합성 모드'}
-        </span>
-      </div>
-      <div style="font-size: 0.92rem; color: var(--text-main); line-height: 1.65; background: #f0fdf4; padding: 1.15rem; border-radius: 12px;">
-        <p><strong>수신:</strong> 내부결재 | <strong>제목:</strong> ${escapeHtml(doc.docTitle)}</p>
-        <p><strong>1. 목적 및 주제:</strong> ${escapeHtml(doc.theme)} (${escapeHtml(doc.teachingMethod)})</p>
-        <p><strong>2. 체험 장소:</strong> ${escapeHtml(doc.locationName)} (총 ${doc.periodCount}차시 / ${escapeHtml(doc.difficultyLevel)})</p>
-        <p><strong>3. 연계 성취기준:</strong> ${(p.standards || []).map(s => escapeHtml(s.code)).join(", ")}</p>
-        <p><strong>4. 맞춤 지원 대책:</strong> ${escapeHtml((p.functionalNeeds || []).join(" / "))}</p>
-        <p><strong>5. 평가 중점:</strong> ${escapeHtml(p.evalFocusTitle)} (지식·기능·태도 3차원 평가)</p>
-      </div>
-      <div style="display: flex; gap: 0.6rem; justify-content: flex-end; margin-top: 1.1rem; flex-wrap: wrap;">
-        <button type="button" class="btn-bubble-tool" data-action="reset-all">처음으로 다시 작성</button>
-        <button type="button" class="btn-bubble-tool" data-action="copy-curriculum">기안문 텍스트 복사</button>
-        <button type="button" class="btn-soft-primary" data-action="download-hwpx">
-          ${hasCustom ? '학교 서식 합성 다운로드 (.hwpx)' : '완성 계획서 다운로드 (.hwpx)'}
-        </button>
       </div>
     </div>
   `;
@@ -2107,19 +2237,24 @@ export function generatePeriodsDataWithStandards(p) {
       itemData = { ...postActivities[Math.min(tIdx, postActivities.length - 1)] };
     }
 
+    const overrideMap = (p.periodOverrides && typeof p.periodOverrides === "object") ? p.periodOverrides : {};
+    const ov = overrideMap[String(i)] || overrideMap[i] || null;
+    const isOverridden = Boolean(ov && typeof ov === "object");
+
     list.push({
       num: i,
       phase,
       phaseBadge,
-      title: `${itemData.title}${cycleSuffix}`,
+      title: (isOverridden && ov.title) ? ov.title : `${itemData.title}${cycleSuffix}`,
       standardsCodes: assignedCodes,
-      summary: itemData.summary,
-      eval: itemData.eval,
-      intro: itemData.intro,
-      body: itemData.body,
-      outro: itemData.outro,
+      summary: (isOverridden && ov.summary) ? ov.summary : itemData.summary,
+      eval: (isOverridden && ov.eval) ? ov.eval : itemData.eval,
+      intro: (isOverridden && ov.intro) ? ov.intro : itemData.intro,
+      body: (isOverridden && ov.body) ? ov.body : itemData.body,
+      outro: (isOverridden && ov.outro) ? ov.outro : itemData.outro,
       questionExample: itemData.questionExample,
-      feedbackTip: itemData.feedbackTip
+      feedbackTip: itemData.feedbackTip,
+      isOverridden
     });
   }
   return list;
@@ -2137,39 +2272,14 @@ async function triggerHwpxDownload() {
     showToast(result.isCustomTemplate ? "학교 서식에 합성된 .hwpx 파일이 다운로드되었습니다!" : "한글(HWPX) 표준 서식 파일이 성공적으로 다운로드되었습니다!", "success");
   } catch (err) {
     console.error("HWPX 다운로드 실패:", err);
-    showToast("HWPX 생성 중 오류가 발생했습니다. 브라우저 콘솔을 확인해 주세요.", "error");
+    showToast("HWPX 파일 생성 중 문제가 발생했습니다. 입력 정보를 확인하신 후 다시 시도해 주세요.", "error");
   }
 }
 
 function triggerCopyCurriculum() {
   const p = appState.plan;
-  const counts = calculatePeriodRatioCounts(p.periodCount);
   const periods = generatePeriodsDataWithStandards(p);
-  const doc = buildPlanDocument(p, periods);
-
-  const text = `[${doc.docTitle}]
-
-1. 프로젝트 개요
-- 프로젝트명: ${doc.theme}
-- 학교급 및 장소: ${doc.schoolLevel} | ${doc.locationName}
-- 차시 배분: 총 ${doc.periodCount}차시 [사전 ${counts.pre}차시 : 현장 ${counts.field}차시 : 사후 ${counts.post}차시 (4:2:4 비율)] (${doc.difficultyLevel})
-- 수업 방식: ${doc.teachingMethod}
-- 핵심 질문: 우리 마을 ${doc.locationName}에서 나에게 필요한 것을 스스로 찾고 안전하게 참여하려면 어떻게 해야 할까?
-
-2. 연계 성취기준
-${(p.standards || []).map(s => `- ${s.code} ${s.title || s.subject || ''}: ${s.desc || ''}`).join("\n")}
-
-3. 학습 목표
-- [지식] ${p.goalKnowledge}
-- [기능] ${p.goalSkill}
-- [태도] ${p.goalAttitude}
-
-4. 참가 학생 맞춤 지원 대책 (익명화 완료)
-${(p.functionalNeeds || []).join("\n")}
-
-5. 차시별 수업 계획 (사전:현장:사후 4:2:4 비율 구성)
-${periods.map(item => `[${item.num}차시 / ${item.phaseBadge}] ${item.title} (연계: ${item.standardsCodes.join(', ')})\n  - 활동: ${item.summary}\n  - 평가: ${item.eval}`).join("\n\n")}
-`;
+  const text = formatPlanText(p, periods);
 
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text).then(() => {
@@ -2213,13 +2323,45 @@ export function showToast(msg, type = "info") {
 
   const t = document.createElement("div");
   t.className = `soft-toast ${type === "error" ? "toast-error" : type === "success" ? "toast-success" : ""}`;
+  t.setAttribute("role", type === "error" ? "alert" : "status");
+  t.tabIndex = 0;
   t.textContent = msg;
   shelf.appendChild(t);
 
-  setTimeout(() => {
-    t.style.opacity = "0";
-    setTimeout(() => {
-      if (t.parentNode) t.parentNode.removeChild(t);
-    }, 300);
-  }, 2400);
+  const duration = type === "error" ? 5000 : 3200;
+  let timerId = null;
+  let isPaused = false;
+
+  const startTimer = (remTime) => {
+    timerId = setTimeout(() => {
+      t.style.opacity = "0";
+      setTimeout(() => {
+        if (t.parentNode) t.parentNode.removeChild(t);
+      }, 300);
+    }, remTime);
+  };
+
+  startTimer(duration);
+
+  // WCAG 2.2.1 Timing Adjustable: 일시 정지 및 재개
+  t.addEventListener("mouseenter", () => {
+    clearTimeout(timerId);
+    isPaused = true;
+  });
+  t.addEventListener("mouseleave", () => {
+    if (isPaused) {
+      isPaused = false;
+      startTimer(1500);
+    }
+  });
+  t.addEventListener("focusin", () => {
+    clearTimeout(timerId);
+    isPaused = true;
+  });
+  t.addEventListener("focusout", () => {
+    if (isPaused) {
+      isPaused = false;
+      startTimer(1500);
+    }
+  });
 }

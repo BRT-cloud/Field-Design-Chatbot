@@ -31,12 +31,17 @@
       <span class="nav-brand-title">체험학습 재구성 챗봇</span>
     </div>
     <div class="nav-stepper-indicator">
-      <span class="step-counter-text" id="stepCounterText">STEP 01 / 11</span>
-      <div class="step-progress-track" role="progressbar" id="stepProgressTrack" aria-valuenow="1" aria-valuemin="1" aria-valuemax="11" aria-label="체험학습 설계 진행률">
-        <div class="step-progress-fill" id="stepProgressFill" style="width: 9%;"></div>
+      <span class="step-counter-text" id="stepCounterText">STEP 01 / 10</span>
+      <div class="step-progress-track" role="progressbar" id="stepProgressTrack" aria-valuenow="1" aria-valuemin="1" aria-valuemax="10" aria-label="체험학습 설계 진행률">
+        <div class="step-progress-fill" id="stepProgressFill" style="width: 10%;"></div>
       </div>
     </div>
     <div class="nav-actions">
+      <button type="button" class="btn-coach-toggle hidden" id="toggleCoachBtn" title="차시 계획 수정 챗봇 열기/닫기" aria-label="차시 계획 수정 챗봇 토글">
+        <span class="coach-sparkle-icon">AI</span>
+        <span class="coach-btn-text">차시 계획 챗봇</span>
+        <span class="coach-badge-pill" id="coachUnreadBadge">ON</span>
+      </button>
       <button type="button" class="btn-bubble-tool" id="resetWizardBtn" title="처음부터 다시 작성">처음으로</button>
     </div>
   </header>
@@ -74,6 +79,17 @@
         </button>
       </div>
     </div>
+
+    <!-- AI 교육과정 코칭 파트너 우측 슬라이드 패널 -->
+    <aside class="coach-slide-panel" id="coachSlidePanel" aria-label="AI 교육과정 코칭 파트너">
+      <!-- 동적 렌더링 영역 -->
+    </aside>
+
+    <!-- 플로팅 코치 열기 버튼 (패널 닫힘 시 노출) -->
+    <button type="button" class="floating-coach-trigger hidden" id="floatingCoachTrigger" aria-label="AI 코치 열기">
+      <span class="floating-icon">✨</span>
+      <span class="floating-text">AI 코치</span>
+    </button>
   </main>
 
   <!-- 인쇄 전용 영역 -->
@@ -82,6 +98,19 @@
   <!-- 토스트 알림 영역 (통합 접근성 지원) -->
   <div class="toast-shelf" id="toastShelf" role="region" aria-label="알림 메시지" aria-live="polite"></div>
 
+  <!-- 초기화 확인 접근성 모달 다이얼로그 (WCAG 2.1 준수) -->
+  <dialog id="resetConfirmDialog" class="soft-dialog" aria-labelledby="dialogTitle" aria-describedby="dialogDesc">
+    <div class="dialog-card">
+      <h2 id="dialogTitle" class="dialog-title">설계 처음부터 다시 시작</h2>
+      <p id="dialogDesc" class="dialog-desc">작성 중인 모든 내용이 기본값으로 초기화됩니다. 계속 진행하시겠습니까?</p>
+      <div class="dialog-actions">
+        <button type="button" class="btn-bubble-tool" id="cancelResetBtn">취소</button>
+        <button type="button" class="btn-soft-primary dialog-danger-btn" id="confirmResetBtn">초기화하기</button>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="jszip.min.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

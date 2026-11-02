@@ -25,7 +25,8 @@ export const WHITELISTED_PLAN_KEYS = new Set([
   'goalSkill',
   'goalAttitude',
   'functionalNeeds',
-  'teachingMethod'
+  'teachingMethod',
+  'periodOverrides'
 ]);
 
 export const PLAN_FIELD_LABELS = {
@@ -40,7 +41,8 @@ export const PLAN_FIELD_LABELS = {
   goalAttitude: '가치·태도 목표',
   functionalNeeds: '맞춤 지원 요구',
   teachingMethod: '교수학습 방식',
-  standards: '연계 성취기준'
+  standards: '연계 성취기준',
+  periodOverrides: '개별 차시 계획'
 };
 
 /**
@@ -80,6 +82,28 @@ export function applyPlanPatch(plan, patch) {
       if (!isNaN(num) && num >= 1 && num <= 30) {
         next.periodCount = num;
       }
+    } else if (key === 'periodOverrides') {
+      if (value === null) {
+        next.periodOverrides = {};
+      } else if (typeof value === 'object' && !Array.isArray(value)) {
+        if (!next.periodOverrides || typeof next.periodOverrides !== 'object' || Array.isArray(next.periodOverrides)) {
+          next.periodOverrides = {};
+        }
+        for (const [pKey, pVal] of Object.entries(value)) {
+          if (pKey === '__proto__' || pKey === 'constructor' || pKey === 'prototype') continue;
+          const pNum = parseInt(pKey, 10);
+          if (isNaN(pNum) || pNum < 1 || pNum > 30) continue;
+          const normKey = String(pNum);
+          if (pVal === null) {
+            delete next.periodOverrides[normKey];
+          } else if (typeof pVal === 'object' && !Array.isArray(pVal)) {
+            next.periodOverrides[normKey] = {
+              ...(next.periodOverrides[normKey] || {}),
+              ...pVal
+            };
+          }
+        }
+      }
     } else {
       next[key] = value;
     }
@@ -88,11 +112,20 @@ export function applyPlanPatch(plan, patch) {
   return sanitizePlan(next);
 }
 
+function summarizePeriodOverride(entry) {
+  if (!entry || typeof entry !== 'object') return '(기본 자동 생성안)';
+  const parts = [];
+  if (entry.title) parts.push(`주제: ${entry.title}`);
+  if (entry.summary) parts.push(`활동: ${entry.summary}`);
+  if (entry.eval) parts.push(`평가: ${entry.eval}`);
+  return parts.length > 0 ? parts.join(' | ') : '(맞춤 수정)';
+}
+
 /**
  * 두 플랜 간의 사용자 표시용 변경사항(Diff)을 계산합니다.
  * @param {Object} oldPlan 
  * @param {Object} newPlan 
- * @returns {Array<{ field: string, label: string, oldValue: any, newValue: any }>}
+ * @returns {Array<{ field: string, label: string, oldValue: any, newValue: any, periodNum?: number }>}
  */
 export function diffPlan(oldPlan, newPlan) {
   if (!oldPlan || !newPlan) return [];
@@ -127,6 +160,25 @@ export function diffPlan(oldPlan, newPlan) {
           oldValue: oldStr || '(없음)',
           newValue: newStr || '(없음)'
         });
+      }
+    } else if (key === 'periodOverrides') {
+      const oldMap = (oldVal && typeof oldVal === 'object' && !Array.isArray(oldVal)) ? oldVal : {};
+      const newMap = (newVal && typeof newVal === 'object' && !Array.isArray(newVal)) ? newVal : {};
+      const allKeys = Array.from(new Set([...Object.keys(oldMap), ...Object.keys(newMap)]))
+        .sort((a, b) => Number(a) - Number(b));
+
+      for (const pKey of allKeys) {
+        const oldEntry = oldMap[pKey] || null;
+        const newEntry = newMap[pKey] || null;
+        if (JSON.stringify(oldEntry) !== JSON.stringify(newEntry)) {
+          diffs.push({
+            field: 'periodOverrides',
+            periodNum: Number(pKey),
+            label: `${pKey}차시 계획`,
+            oldValue: summarizePeriodOverride(oldEntry),
+            newValue: summarizePeriodOverride(newEntry)
+          });
+        }
       }
     } else if (oldVal !== newVal) {
       diffs.push({

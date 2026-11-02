@@ -17,16 +17,146 @@ import { getRecommendedStandards } from '../standards-data.js';
  * @param {string} userInput - 교사가 입력한 대화 텍스트
  * @returns {{ replyText: string, proposal: Object | null }}
  */
+/**
+ * 개별 차시 수정 의도를 파싱합니다.
+ * 예: "3차시 활동을 마트 계산대 역할극으로 바꿔줘", "2차시 주제를 안전한 이동으로 수정해줘", "4차시 평가를 체크리스트 관찰로 바꿔줘"
+ */
+function parsePeriodSpecificIntent(rawInput, plan) {
+  const trimmed = rawInput.trim();
+
+  // "총 8차시", "전체 6차시" 또는 "8차시로 줄여줘/변경해줘"처럼 'N차시로' 형태는 전체 차시 수 변경이므로 제외
+  if (/^(?:총|전체)\s*\d{1,2}\s*차시/i.test(trimmed) || /^\d{1,2}\s*차시\s*로\b/i.test(trimmed) || /^\d{1,2}\s*차시\s*로\s+/i.test(trimmed)) {
+    return null;
+  }
+
+  // 전체 차시 수 증감/변경 단순 발화 제외
+  if (/^\d{1,2}\s*차시\s*(?:로|으로)?\s*(?:줄여|줄이|감소|축소|단축|늘려|늘리|확장|확대|변경|바꿔|조정|설정|구성|맞춰|해\s*줘|해주세요|할래|할게).*$/i.test(trimmed)) {
+    return null;
+  }
+
+  // 모든 차시 개별 수정 초기화
+  if (/^(?:모든|전체)\s*차시\s*(?:수정\s*)?(?:초기화|원래대로|복원)/.test(trimmed)) {
+    return {
+      replyText: '개별 차시에 적용된 모든 맞춤형 수정 내역을 초기화하고 기본 자동 생성안으로 복원합니다.',
+      proposal: {
+        id: `intent-period-reset-all-${Date.now()}`,
+        title: '전체 차시 맞춤 수정 초기화',
+        reason: '모든 차시를 기본 교육과정 활동안으로 복원',
+        patch: {
+          changes: { periodOverrides: null }
+        }
+      }
+    };
+  }
+
+  // 특정 차시 초기화 (예: "3차시 초기화해줘", "2차시 원래대로 돌려줘")
+  const resetMatch = trimmed.match(/^(\d{1,2})\s*차시\s*(?:내용|활동|주제|평가|계획)?\s*(?:을|를)?\s*(?:초기화|원래대로|복원|되돌려)/);
+  if (resetMatch) {
+    const pNum = parseInt(resetMatch[1], 10);
+    return {
+      replyText: `${pNum}차시에 적용된 맞춤 수정을 해제하고 기본 계획안으로 되돌립니다.`,
+      proposal: {
+        id: `intent-period-reset-${pNum}-${Date.now()}`,
+        title: `${pNum}차시 기본안 복원`,
+        reason: `${pNum}차시 개별 수정 해제`,
+        periodNum: pNum,
+        patch: {
+          changes: { periodOverrides: { [pNum]: null } }
+        }
+      }
+    };
+  }
+
+  // 특정 차시 내용 수정 매칭
+  const match = trimmed.match(/^(\d{1,2})\s*차시\s*(?:의\s*)?(평가\s*기준|평가\s*관점|평가|주요\s*활동|활동\s*내용|활동|차시\s*주제|주제|제목|도입|전개|정리|내용|수업|미션)?\s*(?:을|를|은|는|에|에서|:)?\s*(.+)$/i);
+  if (!match) return null;
+
+  const pNum = parseInt(match[1], 10);
+  const fieldKeyword = (match[2] || '').replace(/\s+/g, '');
+  let bodyText = (match[3] || '').trim();
+
+  // 후행 서술어("으로 바꿔줘", "로 수정해줘", "추가해줘", "변경해줘" 등) 제거
+  bodyText = bodyText
+    .replace(/\s*(?:으로|로)\s*(?:바꿔\s*줘|바꿔\s*주세요|바꿔|변경\s*해\s*줘|변경\s*해\s*주세요|변경|수정\s*해\s*줘|수정\s*해\s*주세요|수정|교체\s*해\s*줘|교체|설정\s*해\s*줘|설정|반영\s*해\s*줘|반영|해\s*줘|해주세요|할래|할게)\.?$/i, '')
+    .replace(/\s*(?:을|를)?\s*(?:넣어\s*줘|넣어\s*주세요|추가\s*해\s*줘|추가\s*해\s*주세요|추가|반영\s*해\s*줘|수정\s*해\s*줘|바꿔\s*줘|변경\s*해\s*줘)\.?$/i, '')
+    .replace(/^['"“”‘’]+|['"“”‘’]+$/g, '')
+    .trim();
+
+  if (!bodyText || /^(?:줄여|늘려|변경|바꿔|조정|단축|축소|확장)$/.test(bodyText)) {
+    return null;
+  }
+
+  const maxPeriods = parseInt(plan?.periodCount, 10) || 10;
+  if (pNum < 1 || pNum > maxPeriods) {
+    return {
+      replyText: `현재 계획안은 총 ${maxPeriods}차시로 설정되어 있어 ${pNum}차시를 수정할 수 없습니다. 1~${maxPeriods}차시 범위에서 지정해 주시거나 먼저 총 차시 수를 변경해 주세요.`,
+      proposal: null
+    };
+  }
+
+  let override = {};
+  let fieldLabel = '활동 및 주제';
+
+  if (fieldKeyword.includes('평가')) {
+    fieldLabel = 'UDL 맞춤 평가';
+    override = { eval: bodyText };
+  } else if (fieldKeyword.includes('주제') || fieldKeyword.includes('제목')) {
+    fieldLabel = '차시 주제';
+    override = { title: bodyText };
+  } else if (fieldKeyword === '도입') {
+    fieldLabel = '도입 활동';
+    override = { intro: bodyText };
+  } else if (fieldKeyword === '전개') {
+    fieldLabel = '전개 활동';
+    override = { body: bodyText, summary: bodyText };
+  } else if (fieldKeyword === '정리') {
+    fieldLabel = '정리 활동';
+    override = { outro: bodyText };
+  } else {
+    fieldLabel = '주요 활동 및 주제';
+    override = {
+      title: `${pNum}차시 맞춤: ${bodyText}`,
+      summary: `${bodyText} 중심 학생 맞춤형 활동 수행`,
+      body: `${bodyText} 활동을 학생 수준과 시각적 단서에 맞추어 단계적으로 연습하고 수행하기.`
+    };
+  }
+
+  return {
+    replyText: `${pNum}차시의 ${fieldLabel}을(를) "${bodyText}"(으)로 수정하는 제안을 준비했습니다. [지금 적용하기]를 누르시면 차시 계획표와 세부 지도안에 즉시 반영됩니다.`,
+    proposal: {
+      id: `intent-period-edit-${pNum}-${Date.now()}`,
+      title: `${pNum}차시 ${fieldLabel} 수정`,
+      reason: `교사 요청: ${pNum}차시 "${bodyText}" 반영`,
+      periodNum: pNum,
+      patch: {
+        changes: {
+          periodOverrides: {
+            [pNum]: override
+          }
+        }
+      }
+    }
+  };
+}
+
 export function interpretUserInput(step, plan, userInput) {
   if (!userInput || typeof userInput !== 'string' || !userInput.trim()) {
     return {
-      replyText: '궁금한 점이나 수정하고 싶은 내용을 말씀해 주시면 맞춤 제안을 드릴게요! (예: "8차시로 줄여줘", "더 쉬운 주제로 바꿔줘")',
+      replyText: '수정하고 싶은 차시나 조건을 편하게 말씀해 주세요! (예: "3차시 활동을 마트 계산대 역할극으로 바꿔줘", "8차시로 줄여줘")',
       proposal: null
     };
   }
 
   const text = userInput.trim().toLowerCase();
-  const currentStep = Number(step) || 1;
+  const currentStep = Number(step) || 10;
+
+  // --------------------------------------------------------------------------
+  // 0. 개별 차시 수정 의도 ("3차시 활동을 ...로 바꿔줘", "2차시 평가를 ...로 수정해줘")
+  // --------------------------------------------------------------------------
+  const periodSpecific = parsePeriodSpecificIntent(userInput, plan);
+  if (periodSpecific) {
+    return periodSpecific;
+  }
 
   // --------------------------------------------------------------------------
   // 1. 차시 수 변경 의도 ("N차시로", "차시 줄여줘", "차시 늘려줘")
@@ -352,12 +482,11 @@ export function interpretUserInput(step, plan, userInput) {
     7: '7단계에서는 지식·기능·태도 3차원 목표를 확인하고 필요시 어휘를 수정해 주세요. 평가 중점에 맞게 자동 완성되어 있습니다.',
     8: '8단계에서는 휠체어 이동, 시각 일과표, AAC 등 학생들의 개별 지원 요구를 선택해 주세요. 개인정보(실명 등)는 기재하지 않도록 주의해 주세요.',
     9: '9단계에서는 배움을 이끌 교수학습 방식을 선택합니다. 상황 모의 훈련이나 프로젝트 학습(PBL)이 특수교육 현장에서 널리 활용됩니다.',
-    10: '10단계에서는 완성된 UDL 10차시 계획안을 검토하고, 한글(HWPX) 또는 PDF로 다운로드할 수 있습니다.',
-    11: '11단계에서는 공문서 기안 서식에 반영된 최종 문서를 확인하고 학교 표준 서식으로 출력할 수 있습니다.'
+    10: '완성된 차시 계획안을 검토하고 계십니다! "3차시 활동을 마트 계산대 역할극으로 바꿔줘", "2차시 평가를 사진 카드 선택으로 수정해줘", "8차시로 줄여줘"처럼 원하는 수정 내용을 말씀해 주시면 즉시 반영해 드립니다.'
   };
 
   return {
-    replyText: stepAdvice[currentStep] || '현재 단계의 설정을 검토 중입니다. 원하시는 조건(차시, 주제, 목표, 지원 요구 등)을 말씀해 주시면 바로 수정 제안을 만들어 드릴게요!',
+    replyText: stepAdvice[currentStep] || '차시별 활동이나 전체 계획(차시 수, 난이도, 주제, 지원 요구 등) 중 수정하고 싶은 내용을 편하게 입력해 주세요!',
     proposal: null
   };
 }
